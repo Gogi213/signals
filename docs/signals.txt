@@ -1,0 +1,64 @@
+Спецификация сигналов
+
+## 1. Логика генерации сигнала
+
+Сигнал генерируется, если одновременно выполняются все условия:
+
+### 1.1. Низкий объём торгов (`lowVol`)
+
+* Рассчитывается процентиль объёма за период `vol_period` (по умолчанию 20 баров).
+* Условие:
+
+  ```
+  volume <= percentile(volume, vol_period, vol_pctl)
+  ```
+
+  где `vol_pctl = 5.0%` по умолчанию.
+
+### 1.2. Узкий диапазон цены (`narrowRng`)
+
+* Для каждой свечи: `range = high - low`.
+* Рассчитывается процентиль диапазона за `range_period` (по умолчанию 30 баров).
+* Условие:
+
+  ```
+  (high - low) <= percentile(range, range_period, rng_pctl)
+  ```
+
+  где `rng_pctl = 5.0%` по умолчанию.
+
+### 1.3. Высокий NATR (`highNatr`)
+
+* Считается нормализованный ATR за период `natr_period` (по умолчанию 20 баров).
+* Условие:
+
+  ```
+  natr(natr_period) > natr_min
+  ```
+
+  где `natr_min = 0.6%` по умолчанию.
+
+### 1.4. Фильтр по росту (`growthFilter`)
+
+* Рассчитывается рост цены за `lookback_period` (по умолчанию 50 баров).
+* Условие:
+
+  ```
+  growth_pct = (current_close - close[lookback_period]) / close[lookback_period] * 100
+  growth_pct >= min_growth_pct
+  ```
+
+  где `min_growth_pct = -0.1%` по умолчанию.
+
+### 1.5. Итоговый сигнал
+
+* Базовый сигнал (`signalRaw`) = `lowVol AND narrowRng AND highNatr`.
+* Финальный сигнал = `signalRaw AND growthFilter`.
+* Формула:
+
+  ```
+  signal = (lowVol AND narrowRng AND highNatr) AND (growth_pct >= min_growth_pct)
+  ```
+
+---
+

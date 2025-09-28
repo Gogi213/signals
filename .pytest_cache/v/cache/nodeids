@@ -1,0 +1,11 @@
+[
+  "test_signals.py::test_calculate_atr",
+  "test_signals.py::test_calculate_natr",
+  "test_signals.py::test_calculate_percentile",
+  "test_signals.py::test_generate_signal",
+  "test_signals.py::test_growth_filter",
+  "test_signals.py::test_high_natr_condition",
+  "test_signals.py::test_low_volume_condition",
+  "test_signals.py::test_narrow_range_condition",
+  "test_signals.py::test_process_trades_for_signals"
+]
