@@ -56,7 +56,6 @@ async def main():
     """
     # Get all symbols and filter by volume before creating WebSocket aggregator
     filtered_coins = get_all_symbols_by_volume()
-    logger.info(f"Loaded {len(filtered_coins)} coins for trading")
 
     # Create WebSocket aggregator with filtered coins
     aggregator = TradeWebSocket(filtered_coins)
@@ -64,13 +63,12 @@ async def main():
     # Track coins with no data during warmup period
     excluded_coins = set()
     coin_first_seen = {}  # Track when each coin was first processed
-    start_time = time.time()
-    
+
     # Log connection info
     log_connection_info(len(filtered_coins))
-    
-    # Start WebSocket connection with trade flow display in a separate task
-    ws_task = asyncio.create_task(aggregator.start_connection_with_display())
+
+    # Start WebSocket connection in a separate task
+    ws_task = asyncio.create_task(aggregator.start_connection())
     
     # Keep the connection running and process signals in real-time
     last_warmup_log = 0

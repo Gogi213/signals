@@ -1,6 +1,6 @@
 """
 Module for interacting with trading APIs (Bybit)
-FIXED: Added HTTP timeouts and improved error handling
+Includes HTTP timeouts and comprehensive error handling
 """
 import requests
 import logging
@@ -16,8 +16,7 @@ session.timeout = (CONNECT_TIMEOUT, HTTP_TIMEOUT)  # (connect_timeout, read_time
 
 def get_recent_trades(symbol: str, limit: int = 100) -> Optional[List[Dict]]:
     """
-    Get recent trades for a symbol from Bybit API
-    FIXED: Added timeouts and better error handling
+    Get recent trades for a symbol from Bybit API with timeouts
     """
     url = "https://api.bybit.com/v5/market/recent-trade"
     params = {
@@ -64,8 +63,7 @@ def get_recent_trades(symbol: str, limit: int = 100) -> Optional[List[Dict]]:
 
 def get_futures_symbols() -> List[str]:
     """
-    Get list of all futures symbols from Bybit
-    FIXED: Added timeouts and better error handling
+    Get list of all futures symbols from Bybit with timeouts
     """
     url = "https://api.bybit.com/v5/market/tickers"
     params = {
@@ -105,7 +103,6 @@ def get_futures_symbols() -> List[str]:
 def filter_symbols_by_volume(symbols: List[str]) -> List[str]:
     """
     Filter symbols by daily volume, keeping only those with volume >= MIN_DAILY_VOLUME
-    FIXED: Added timeouts and better error handling
     """
     url = "https://api.bybit.com/v5/market/tickers"
     params = {
@@ -156,7 +153,6 @@ def filter_symbols_by_volume(symbols: List[str]) -> List[str]:
 def get_all_symbols_by_volume(min_volume: float = MIN_DAILY_VOLUME) -> List[str]:
     """
     Get all symbols from Bybit and filter them by volume
-    FIXED: Added timeouts and better error handling
     """
     # Get all available symbols
     all_symbols = get_futures_symbols()

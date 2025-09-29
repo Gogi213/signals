@@ -19,14 +19,14 @@ DEFAULT_SERVER_URLS = ['localhost', '192.168.1.100']
 
 # Signal processing settings
 DEFAULT_UPDATE_INTERVAL = 0.3
-WARMUP_INTERVALS = 1  # Number of intervals to warm up before signals
+WARMUP_INTERVALS = 25  # Number of intervals to warm up before signals
 CANDLE_INTERVAL_SECONDS = 10  # Each candle represents 10 seconds
 # NOTE: TRADES_BUFFER_SECONDS removed - now using incremental candle building with rolling 100-candle limit
 
 # WebSocket configuration
 WS_URL = 'wss://stream.bybit.com/v5/public/linear'
 MAX_CONNECTIONS = 20
-MAX_COINS_PER_CONNECTION = 4
+MAX_COINS_PER_CONNECTION = 3
 
 # HTTP request timeouts
 HTTP_TIMEOUT = 30
@@ -64,6 +64,8 @@ class JSONFormatter(logging.Formatter):
             log_entry['coin'] = record.coin
         if hasattr(record, 'signal_type'):
             log_entry['signal_type'] = record.signal_type
+        if hasattr(record, 'criteria_details'):
+            log_entry['criteria_details'] = record.criteria_details
         if hasattr(record, 'failed_criteria'):
             log_entry['failed_criteria'] = record.failed_criteria
 
@@ -120,45 +122,68 @@ def setup_logging():
     logging.getLogger('asyncio').setLevel(logging.WARNING)
 
 def log_signal(coin: str, signal: bool, signal_data: dict = None):
-    """Log trading signal in clean structured format"""
+    """
+    Log trading signal with full details for all criteria
+    Skips warmup/insufficient data logs but logs ALL post-warmup signals
+    """
+    signals_logger = logging.getLogger('signals')
 
-    # Skip all warmup and insufficient data logs from signals
-    if not signal and signal_data and 'criteria' in signal_data:
+    # Skip only warmup and insufficient data logs
+    if signal_data and 'criteria' in signal_data:
         criteria = signal_data['criteria']
         validation_error = criteria.get('validation_error', '')
-        if validation_error:  # Skip all validation errors (warmup, insufficient data)
+        if validation_error:  # Skip warmup/insufficient data
             return
 
-    # Only log actual trading signals (BUY or conditions met)
-    logger = logging.getLogger('signals')
+    # Log ALL signals after warmup with full details
+    signal_text = "BUY" if signal else "NO"
 
-    signal_text = "BUY" if signal else "NO SIGNAL"
-    message = f"{coin} - {signal_text}"
+    # Build detailed message
+    parts = [f"{coin} | SIGNAL: {signal_text}"]
 
-    # Add detailed criteria for signals
     if signal_data and 'criteria' in signal_data:
         criteria = signal_data['criteria']
 
-        if criteria.get('validation_error'):
-            message += f" ({criteria['validation_error']})"
-        elif 'criteria_details' in criteria:
-            # Show detailed values for all criteria
+        # Get detailed criteria if available
+        if 'criteria_details' in criteria:
             details = criteria['criteria_details']
-            if details:  # Ensure details is not None
-                parts = []
 
-                for name, data in details.items():
-                    status = "PASS" if data.get('passed', False) else "FAIL"
-                    current = data.get('current', 0)
-                    threshold = data.get('threshold', 0)
-                    parts.append(f"{name}:{status}({current}/{threshold})")
+            # Format each criterion with numbers
+            for criterion_name, criterion_data in details.items():
+                if criterion_data:
+                    passed = criterion_data.get('passed', False)
+                    status = "PASS" if passed else "FAIL"
+                    current = criterion_data.get('current', 0)
+                    threshold = criterion_data.get('threshold', 0)
 
-                if parts:
-                    message += f" [{', '.join(parts)}]"
+                    # Format numbers nicely based on magnitude
+                    if isinstance(current, float):
+                        if abs(current) < 0.01:
+                            current_str = f"{current:.6f}"
+                        elif abs(current) < 1:
+                            current_str = f"{current:.4f}"
+                        else:
+                            current_str = f"{current:.2f}"
+                    else:
+                        current_str = str(current)
 
-    # Create clean log record with minimal data
+                    if isinstance(threshold, float):
+                        if abs(threshold) < 0.01:
+                            threshold_str = f"{threshold:.6f}"
+                        elif abs(threshold) < 1:
+                            threshold_str = f"{threshold:.4f}"
+                        else:
+                            threshold_str = f"{threshold:.2f}"
+                    else:
+                        threshold_str = str(threshold)
+
+                    parts.append(f"{criterion_name}:{status}({current_str}/{threshold_str})")
+
+    message = " | ".join(parts)
+
+    # Create structured log record for JSON
     record = logging.LogRecord(
-        name=logger.name,
+        name=signals_logger.name,
         level=logging.INFO,
         pathname='',
         lineno=0,
@@ -167,15 +192,19 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None):
         exc_info=None
     )
 
-    # Add only essential fields for JSON
+    # Add structured data for JSON output
     record.coin = coin
     record.signal_type = signal_text
-    if not signal and signal_data and 'criteria' in signal_data and signal_data['criteria']:
-        record.failed_criteria = [k for k, v in signal_data['criteria'].items()
+
+    if signal_data and 'criteria' in signal_data:
+        criteria = signal_data['criteria']
+        if 'criteria_details' in criteria:
+            record.criteria_details = criteria['criteria_details']
+
+        # Add list of failed criteria for easy filtering
+        record.failed_criteria = [k for k, v in criteria.items()
                                  if k in ['low_vol', 'narrow_rng', 'high_natr', 'growth_filter'] and not v]
 
-    # Use the signals logger instead of handle
-    signals_logger = logging.getLogger('signals')
     signals_logger.info(message)
 
 def log_connection_info(coin_count: int):
