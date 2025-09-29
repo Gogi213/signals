@@ -79,126 +79,172 @@ def calculate_percentile(data: List[float], period: int, percentile: float) -> L
     return result
 
 
-def check_low_volume_condition(candles: List[Dict], 
-                             vol_period: int = 20, 
-                             vol_pctl: float = 5.0) -> bool:
+def check_low_volume_condition(candles: List[Dict],
+                             vol_period: int = 20,
+                             vol_pctl: float = 5.0) -> Tuple[bool, Dict]:
     """
     Check if volume is low (lowVol condition)
+    Returns (passed, details)
     """
     if not candles:
-        return False
-    
+        return False, {'current': 0, 'threshold': 0, 'passed': False}
+
     volumes = [candle['volume'] for candle in candles]
     percentiles = calculate_percentile(volumes, vol_period, vol_pctl)
-    
+
     # Check the last candle
     current_volume = volumes[-1]
     current_percentile = percentiles[-1]
-    
-    return current_volume <= current_percentile
+    passed = current_volume <= current_percentile
+
+    return passed, {
+        'current': round(current_volume, 2),
+        'threshold': round(current_percentile, 2),
+        'passed': passed
+    }
 
 
-def check_narrow_range_condition(candles: List[Dict], 
-                               range_period: int = 30, 
-                               rng_pctl: float = 5.0) -> bool:
+def check_narrow_range_condition(candles: List[Dict],
+                               range_period: int = 30,
+                               rng_pctl: float = 5.0) -> Tuple[bool, Dict]:
     """
     Check if price range is narrow (narrowRng condition)
+    Returns (passed, details)
     """
     if not candles:
-        return False
-    
+        return False, {'current': 0, 'threshold': 0, 'passed': False}
+
     ranges = [(candle['high'] - candle['low']) for candle in candles]
     percentiles = calculate_percentile(ranges, range_period, rng_pctl)
-    
+
     # Check the last candle
     current_range = ranges[-1]
     current_percentile = percentiles[-1]
-    
-    return current_range <= current_percentile
+    passed = current_range <= current_percentile
+
+    return passed, {
+        'current': round(current_range, 6),
+        'threshold': round(current_percentile, 6),
+        'passed': passed
+    }
 
 
-def check_high_natr_condition(candles: List[Dict], 
-                            natr_period: int = 20, 
-                            natr_min: float = 0.6) -> bool:
+def check_high_natr_condition(candles: List[Dict],
+                            natr_period: int = 20,
+                            natr_min: float = 0.6) -> Tuple[bool, Dict]:
     """
     Check if NATR is high (highNatr condition)
+    Returns (passed, details)
     """
     if not candles:
-        return False
-    
+        return False, {'current': 0, 'threshold': natr_min, 'passed': False}
+
     natr_values = calculate_natr(candles, natr_period)
-    
+
     # Check the last candle
     current_natr = natr_values[-1]
-    
-    return current_natr > natr_min
+    passed = current_natr > natr_min
+
+    return passed, {
+        'current': round(current_natr, 3),
+        'threshold': natr_min,
+        'passed': passed
+    }
 
 
-def check_growth_filter(candles: List[Dict], 
-                       lookback_period: int = 50, 
-                       min_growth_pct: float = -0.1) -> bool:
+def check_growth_filter(candles: List[Dict],
+                       lookback_period: int = 50,
+                       min_growth_pct: float = -0.1) -> Tuple[bool, Dict]:
     """
     Check growth filter condition
+    Returns (passed, details)
     """
     if len(candles) < lookback_period + 1:
-        return True  # If not enough data, consider condition satisfied
-    
+        return True, {'current': 0, 'threshold': min_growth_pct, 'passed': True, 'note': 'insufficient_data'}
+
     current_close = candles[-1]['close']
     lookback_close = candles[-lookback_period - 1]['close']
-    
+
     if lookback_close and lookback_close != 0:
         growth_pct = ((current_close - lookback_close) / abs(lookback_close)) * 100
-        return growth_pct >= min_growth_pct
+        passed = growth_pct >= min_growth_pct
+        return passed, {
+            'current': round(growth_pct, 2),
+            'threshold': min_growth_pct,
+            'passed': passed
+        }
     else:
-        return True  # If lookback close is zero, consider condition satisfied
+        return True, {'current': 0, 'threshold': min_growth_pct, 'passed': True, 'note': 'zero_lookback'}
 
 
-def generate_signal(candles: List[Dict]) -> bool:
+def generate_signal(candles: List[Dict]) -> Tuple[bool, Dict]:
     """
     Generate signal based on all conditions
-    Returns True if all conditions are met, False otherwise
+    Returns (signal, detailed_info) with actual values and pass/fail status
     """
+    detailed_info = {
+        'validation_error': '',
+        'candle_count': len(candles),
+        'criteria_details': {}
+    }
+
     if len(candles) < 20:  # Need enough data for all checks
-        return False
-    
+        detailed_info['validation_error'] = f'Insufficient data: {len(candles)} candles (need 20+)'
+        return False, detailed_info
+
     # Validate candle data to prevent negative ranges
     for i, candle in enumerate(candles):
         if candle['high'] < candle['low']:
-            print(f"Warning: Invalid candle {i}: high ({candle['high']}) < low ({candle['low']})")
-            return False
+            detailed_info['validation_error'] = f'Invalid candle {i}: high < low'
+            return False, detailed_info
         if candle['close'] < candle['low'] or candle['close'] > candle['high']:
-            print(f"Warning: Invalid candle {i}: close ({candle['close']}) not in range [{candle['low']}, {candle['high']}]")
-            return False
-    
-    # Check all conditions
-    low_vol = check_low_volume_condition(candles)
-    narrow_rng = check_narrow_range_condition(candles)
-    high_natr = check_high_natr_condition(candles)
-    growth_filter = check_growth_filter(candles)
-    
+            detailed_info['validation_error'] = f'Invalid candle {i}: close out of range'
+            return False, detailed_info
+
+    # Check all conditions with detailed values
+    low_vol_passed, low_vol_details = check_low_volume_condition(candles)
+    narrow_rng_passed, narrow_rng_details = check_narrow_range_condition(candles)
+    high_natr_passed, high_natr_details = check_high_natr_condition(candles)
+    growth_filter_passed, growth_filter_details = check_growth_filter(candles)
+
+    # Store detailed criteria
+    detailed_info['criteria_details'] = {
+        'low_vol': low_vol_details,
+        'narrow_rng': narrow_rng_details,
+        'high_natr': high_natr_details,
+        'growth_filter': growth_filter_details
+    }
+
+    # Store simple pass/fail for backward compatibility
+    detailed_info['low_vol'] = low_vol_passed
+    detailed_info['narrow_rng'] = narrow_rng_passed
+    detailed_info['high_natr'] = high_natr_passed
+    detailed_info['growth_filter'] = growth_filter_passed
+
     # Combine all conditions
-    signal_raw = low_vol and narrow_rng and high_natr
-    final_signal = signal_raw and growth_filter
-    
-    return final_signal
+    signal_raw = low_vol_passed and narrow_rng_passed and high_natr_passed
+    final_signal = signal_raw and growth_filter_passed
+
+    return final_signal, detailed_info
 
 
-def process_trades_for_signals(trades: List[Dict], 
+def process_trades_for_signals(trades: List[Dict],
                               timeframe_ms: int = 10000) -> Tuple[bool, Dict]:
     """
     Process trades and generate signals based on conditions
     """
     # Aggregate trades to candles
     candles = aggregate_trades_to_candles(trades, timeframe_ms)
-    
-    # Generate signal
-    signal = generate_signal(candles)
-    
-    # Prepare signal data
+
+    # Generate signal with detailed info
+    signal, detailed_info = generate_signal(candles)
+
+    # Prepare comprehensive signal data
     signal_data = {
         'signal': signal,
         'candle_count': len(candles),
-        'last_candle': candles[-1] if candles else None
+        'last_candle': candles[-1] if candles else None,
+        'criteria': detailed_info
     }
-    
+
     return signal, signal_data

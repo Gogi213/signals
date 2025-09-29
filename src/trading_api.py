@@ -5,7 +5,7 @@ FIXED: Added HTTP timeouts and improved error handling
 import requests
 import logging
 from typing import List, Dict, Optional
-from .config import MIN_DAILY_VOLUME, HTTP_TIMEOUT, CONNECT_TIMEOUT
+from .config import MIN_DAILY_VOLUME, HTTP_TIMEOUT, CONNECT_TIMEOUT, BLACKLISTED_COINS
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -185,9 +185,12 @@ def get_all_symbols_by_volume(min_volume: float = MIN_DAILY_VOLUME) -> List[str]
                 except (ValueError, TypeError):
                     volume_map[item['symbol']] = 0
 
-            # Filter symbols that have volume >= min_volume
-            filtered_symbols = [symbol for symbol in all_symbols if volume_map.get(symbol, 0) >= min_volume]
-            logger.info(f"Filtered {len(filtered_symbols)} of {len(all_symbols)} symbols by volume (min: {min_volume})")
+            # Filter symbols that have volume >= min_volume and not in blacklist
+            filtered_by_volume = [symbol for symbol in all_symbols if volume_map.get(symbol, 0) >= min_volume]
+            filtered_symbols = [symbol for symbol in filtered_by_volume if symbol not in BLACKLISTED_COINS]
+
+            blacklisted_count = len(filtered_by_volume) - len(filtered_symbols)
+            logger.info(f"Filtered {len(filtered_symbols)} of {len(all_symbols)} symbols by volume (min: {min_volume}), excluded {blacklisted_count} blacklisted coins")
             return filtered_symbols
         else:
             logger.error(f"API Error getting ticker data for volume filter: {data['retMsg']}")

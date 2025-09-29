@@ -8,11 +8,13 @@ from typing import List, Dict, Optional
 def aggregate_trades_to_candles(trades: List[Dict], timeframe_ms: int = 1000) -> List[Dict]:
     """
     Aggregate trades into candles based on timeframe
-    Default is 1-second candles (1000 ms)
+    Default is 1-second candles (1000 ms) - general purpose function
+    For signals, typically used with 10-second timeframe (10000 ms)
     """
     if not trades:
         return []
-    
+
+
     # Round timestamp to the specified timeframe
     for trade in trades:
         trade['rounded_time'] = (trade['timestamp'] // timeframe_ms) * timeframe_ms

@@ -1,5 +1,5 @@
 """
-Main application file for the trading signals system with improved logging
+Main application file for the trading signals system
 """
 import asyncio
 import time
@@ -8,14 +8,15 @@ from typing import List, Dict
 
 from src.websocket_handler import TradeWebSocket
 from src.strategy_client import StrategyRunner
-from src.config import DEFAULT_STRATEGY_NAMES, DEFAULT_SERVER_URLS, DEFAULT_UPDATE_INTERVAL, MIN_DAILY_VOLUME
+from src.config import (
+    DEFAULT_STRATEGY_NAMES, DEFAULT_SERVER_URLS, DEFAULT_UPDATE_INTERVAL,
+    MIN_DAILY_VOLUME, build_strategy_url, setup_logging, log_signal, log_connection_info,
+    log_warmup_progress, WARMUP_INTERVALS
+)
 from src.trading_api import get_all_symbols_by_volume
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logging
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Setup JSON logging
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +24,7 @@ async def send_signal(url: str, strategy_name: str, coin: str, signal: bool):
     """
     Send signal to strategy based on trading conditions
     """
-    strategy_url_update = f"http://{url}:3001/update_settings"
+    strategy_url_update = build_strategy_url(url)
     strategy_runner_update = StrategyRunner(strategy_url_update)
 
     signal_data = {
@@ -36,11 +37,6 @@ async def send_signal(url: str, strategy_name: str, coin: str, signal: bool):
         "settings": signal_data
     }
 
-    import json
-    data = json.dumps(update_strategy_request, ensure_ascii=False)
-    # Only log the signal itself
-    if signal:
-        logger.info(f"Signal: {coin} - BUY")
     await strategy_runner_update.call_with_json(update_strategy_request)
 
 
@@ -60,42 +56,73 @@ async def main():
     """
     # Get all symbols and filter by volume before creating WebSocket aggregator
     filtered_coins = get_all_symbols_by_volume()
-    logger.debug(f"All filtered coins that will be used: {filtered_coins}")
-    logger.info(f"Total number of filtered coins: {len(filtered_coins)}")
-    # This will be logged in TradeWebSocket constructor
-     
+    logger.info(f"Loaded {len(filtered_coins)} coins for trading")
+
     # Create WebSocket aggregator with filtered coins
     aggregator = TradeWebSocket(filtered_coins)
+
+    # Track coins with no data during warmup period
+    excluded_coins = set()
+    coin_first_seen = {}  # Track when each coin was first processed
+    start_time = time.time()
     
-    # Add logging for WebSocket connection events
-    def on_connect():
-        logger.info("WebSocket connected")
-    
-    def on_disconnect():
-        logger.info("WebSocket disconnected")
-    
-    # Set up event handlers
-    aggregator.on_connect = on_connect
-    aggregator.on_disconnect = on_disconnect
+    # Log connection info
+    log_connection_info(len(filtered_coins))
     
     # Start WebSocket connection with trade flow display in a separate task
     ws_task = asyncio.create_task(aggregator.start_connection_with_display())
     
     # Keep the connection running and process signals in real-time
+    last_warmup_log = 0
     try:
         while True:
             # Check for signals for all symbols in real-time
+            warmup_active = False
+            min_candles = float('inf')
+
             for coin in filtered_coins:
+                # Skip excluded coins
+                if coin in excluded_coins:
+                    continue
+
+                # Track when coin was first seen
+                current_time = time.time()
+                if coin not in coin_first_seen:
+                    coin_first_seen[coin] = current_time
+
                 # Get signal data for the coin
                 signal, signal_info = aggregator.get_signal_data(coin)
-                
-                # Send signal immediately if it's True
+
+                # Check if coin has no data for too long during warmup (exclude after 10 minutes)
+                time_since_start = current_time - coin_first_seen[coin]
+                if (signal_info and signal_info.get('candle_count', 0) == 0 and
+                    time_since_start > 600):  # 10 minutes with no data
+                    excluded_coins.add(coin)
+                    logger.warning(f"Excluding {coin} - no trading data for {time_since_start:.0f}s")
+                    continue
+
+                # Check if any coin is still warming up
+                if signal_info and 'criteria' in signal_info:
+                    criteria = signal_info['criteria']
+                    if criteria.get('validation_error', '').startswith('Warmup:'):
+                        warmup_active = True
+                        candle_count = criteria.get('candle_count', 0)
+                        min_candles = min(min_candles, candle_count)
+
+                # Log and send signal
+                log_signal(coin, signal, signal_info)
+
                 if signal:
-                    logger.info(f"Signal: {coin} - BUY")
                     await send_signals_loop(coin, signal)
                     # Small delay to avoid overwhelming the system
                     await asyncio.sleep(0.1)
-            
+
+            # Log warmup progress every 10 intervals
+            if warmup_active and min_candles != float('inf'):
+                if min_candles - last_warmup_log >= 10 or min_candles == 1:
+                    log_warmup_progress(min_candles, WARMUP_INTERVALS)
+                    last_warmup_log = min_candles
+
             # Check for signals every 0.3 seconds for real-time processing
             await asyncio.sleep(0.3)
     
