@@ -1,6 +1,10 @@
 # Ignore old files that have been refactored
 example_mean_range_load_settings.ipynb
 
+# Data
+*.csv
+*.json
+
 # Python
 __pycache__/
 *.py[cod]
