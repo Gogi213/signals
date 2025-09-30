@@ -5,14 +5,14 @@ Manages multiple connections, candle aggregation, and synchronized finalization
 import asyncio
 import websockets
 import json
-import logging
+# import logging
 import time
 from typing import List, Dict, Callable, Optional, Tuple
 from src.candle_aggregator import create_candle_from_trades
 from src.config import WARMUP_INTERVALS, log_websocket_event, log_reconnect
 
 # Configure logging
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
 class TradeWebSocket:
@@ -32,6 +32,8 @@ class TradeWebSocket:
         self._connection_tasks = []  # Track connection tasks for graceful shutdown
         self._start_time = time.time() # Track when system started for warmup
         self._candle_locks = {}         # Locks to prevent race conditions during finalization
+        self._trades_by_interval = {}   # Store trades by 10-second intervals for each coin
+        self._seen_trade_signatures = {}  # Track seen trades for deduplication (timestamp_price_size)
 
         # Initialize candle buffers for each coin
         for coin in self.coins:
@@ -43,6 +45,8 @@ class TradeWebSocket:
                 'last_close_price': None           # For forward-fill when no trades
             }
             self._candle_locks[coin] = asyncio.Lock()  # Lock for each coin
+            self._trades_by_interval[coin] = {}    # Store trades by 10-second intervals
+            self._seen_trade_signatures[coin] = set()  # Deduplication tracking per coin
 
         # Event handlers for connection events
         self.on_connect: Optional[Callable] = None
@@ -107,7 +111,7 @@ class TradeWebSocket:
                         "args": topics
                     }
                     await websocket.send(json.dumps(subscribe_msg))
-                    logger.info(f"📡 WebSocket {connection_id}: Subscribed to {len(coins_for_connection)} symbols: {coins_for_connection[:3]}...")
+                    # logger.info(f"📡 WebSocket {connection_id}: Subscribed to {len(coins_for_connection)} symbols: {coins_for_connection[:3]}...")
 
                     # Reset reconnect delay on successful connection
                     reconnect_delay = 5
@@ -137,10 +141,14 @@ class TradeWebSocket:
                                             else:
                                                 timestamp_ms = bybit_timestamp
 
+                                            # Convert string values to appropriate types
+                                            price = float(trade['p'])
+                                            size = float(trade['v'])  # Convert string volume to float
+                                            
                                             trade_data = {
                                                 'timestamp': timestamp_ms,
-                                                'price': float(trade['p']),
-                                                'size': float(trade['v']),
+                                                'price': price,
+                                                'size': size,
                                                 'side': trade['S']
                                             }
 
@@ -148,7 +156,7 @@ class TradeWebSocket:
                                             if symbol in self.current_candle_data:
                                                 await self._process_trade_to_candle(symbol, trade_data)
                                             else:
-                                                logger.warning(f"⚠️ Symbol {symbol} not in current_candle_data!")
+                                                pass  # logger.warning(f"⚠️ Symbol {symbol} not in current_candle_data!")
                                         except (KeyError, ValueError, TypeError) as e:
                                             # Skip invalid trade data silently
                                             continue
@@ -167,25 +175,25 @@ class TradeWebSocket:
                                 self.on_disconnect()
                             break
                         except json.JSONDecodeError as e:
-                            logger.error(f"Connection {connection_id}: JSON decode error: {e}")
+                            # logger.error(f"Connection {connection_id}: JSON decode error: {e}")
                             await asyncio.sleep(1)
                         except Exception as e:
-                            logger.error(f"Connection {connection_id}: Message processing error: {e}")
+                            pass  # logger.error(f"Connection {connection_id}: Message processing error: {e}")
                             await asyncio.sleep(1)
 
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"Connection {connection_id}: Connection closed ({e})")
+                pass  # logger.warning(f"Connection {connection_id}: Connection closed ({e})")
                 if self.on_disconnect:
                     self.on_disconnect()
             except websockets.exceptions.InvalidHandshake as e:
-                logger.error(f"Connection {connection_id}: Handshake failed ({e})")
+                pass  # logger.error(f"Connection {connection_id}: Handshake failed ({e})")
                 reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
             except asyncio.TimeoutError:
-                logger.error(f"Connection {connection_id}: Connection timeout")
+                pass  # logger.error(f"Connection {connection_id}: Connection timeout")
             except OSError as e:
-                logger.error(f"Connection {connection_id}: Network error ({e})")
+                pass  # logger.error(f"Connection {connection_id}: Network error ({e})")
             except Exception as e:
-                logger.error(f"Connection {connection_id}: Unexpected error: {type(e).__name__}: {e}")
+                pass  # logger.error(f"Connection {connection_id}: Unexpected error: {type(e).__name__}: {e}")
                 import traceback
                 # Log reconnection
                 from src.config import log_reconnect
@@ -209,6 +217,10 @@ class TradeWebSocket:
         # Distribute symbols across multiple connections
         connections = self._distribute_symbols_to_connections()
 
+        # Log connection information
+        from src.config import log_connection_info
+        log_connection_info(len(self.coins))
+
         # Start connection event handler if set
         if self.on_connect:
             self.on_connect()
@@ -226,7 +238,7 @@ class TradeWebSocket:
         try:
             await asyncio.gather(*self._connection_tasks, return_exceptions=True)
         except Exception as e:
-            logger.error(f"Error in connection gathering: {e}")
+            pass  # logger.error(f"Error in connection gathering: {e}")
 
     async def _candle_finalization_timer(self):
         """
@@ -242,7 +254,7 @@ class TradeWebSocket:
         wait_ms = next_boundary - current_time_ms
         await asyncio.sleep(wait_ms / 1000.0)
 
-        logger.info("🕰️ Candle finalization timer started (with gap-filling)")
+        pass  # logger.info("🕰️ Candle finalization timer started (with gap-filling)")
 
         while self.running:
             try:
@@ -265,22 +277,29 @@ class TradeWebSocket:
 
                         # Set starting boundary
                         if last_boundary == 0:
-                            # First candle - use the candle_start_time from first trade
-                            last_boundary = current_data['candle_start_time']
+                            if current_data['candle_start_time'] is not None:
+                                # First candle - use the candle_start_time from first trade
+                                last_boundary = current_data['candle_start_time']
+                            else:
+                                # No trades yet for this symbol, skip to next symbol
+                                continue
 
                         # Create ALL candles from last_boundary to current_boundary
                         boundary = last_boundary
                         while boundary < current_boundary:
-                            # Check if we have trades for this specific boundary
-                            if (current_data['candle_start_time'] == boundary and
-                                current_data['trades']):
+                            # Check if we have trades for this specific boundary in _trades_by_interval
+                            trades_for_boundary = self._trades_by_interval[symbol].get(boundary, [])
+                            if trades_for_boundary:
                                 # Have trades for this period - create real candle
                                 completed_candle = create_candle_from_trades(
-                                    current_data['trades'],
+                                    trades_for_boundary,
                                     boundary
                                 )
                                 # Update last close price for future forward-fill
                                 current_data['last_close_price'] = completed_candle['close']
+                                
+                                # Remove the processed trades from _trades_by_interval
+                                del self._trades_by_interval[symbol][boundary]
 
                             elif current_data['last_close_price'] is not None:
                                 # No trades for this period - forward-fill with last price
@@ -293,23 +312,24 @@ class TradeWebSocket:
                                     'volume': 0
                                 }
                             else:
-                                # No trades and no last price - skip this boundary
+                                # No trades and no last price - this means no previous data for this symbol
+                                # We still need to advance the boundary to avoid infinite loop
                                 boundary += candle_interval_ms
                                 continue
 
                             # Append candle to buffer
                             self.candles_buffer[symbol].append(completed_candle)
 
+                            # Log new candle
+                            from src.config import log_new_candle
+                            log_new_candle(symbol, completed_candle)
+
                             # Move to next boundary
                             boundary += candle_interval_ms
 
-                        # Log only the LAST created candle to avoid spam
+                        # Update progress for warmup tracking only
                         candle_count = len(self.candles_buffer[symbol])
-                        if candle_count > 0:
-                            last_candle = self.candles_buffer[symbol][-1]
-                            if candle_count <= 5 or candle_count % 10 == 0:
-                                volume_str = f"vol:{last_candle['volume']:.0f}" if last_candle['volume'] > 0 else "forward-fill"
-                                logger.info(f"🕰️ {symbol}: Candle #{candle_count} | Price: {last_candle['close']} | {volume_str}")
+                        # No logging at all to fully remove logging
 
                         # Trim buffer ONCE after all candles created
                         if len(self.candles_buffer[symbol]) > WARMUP_INTERVALS:
@@ -319,7 +339,9 @@ class TradeWebSocket:
                         current_data['last_finalized_boundary'] = current_boundary
 
                         # Reset current candle data if it was finalized
-                        if current_data['candle_start_time'] is not None and current_data['candle_start_time'] < current_boundary:
+                        # Only reset if the current candle start time was within the finalized range
+                        if (current_data['candle_start_time'] is not None and
+                            current_data['candle_start_time'] < current_boundary):
                             current_data['trades'] = []
                             current_data['candle_start_time'] = None
 
@@ -327,9 +349,9 @@ class TradeWebSocket:
                 await asyncio.sleep(10.0)
 
             except Exception as e:
-                logger.error(f"Error in candle finalization timer: {e}")
+                pass  # logger.error(f"Error in candle finalization timer: {e}")
                 import traceback
-                logger.error(traceback.format_exc())
+                # logger.error(traceback.format_exc())
                 await asyncio.sleep(10.0)  # Continue with normal interval
 
     async def _process_trade_to_candle(self, symbol: str, trade_data: Dict):
@@ -337,30 +359,47 @@ class TradeWebSocket:
         Add trades to current candle - timer handles synchronized finalization
         Trades are accumulated until timer creates the candle
         Uses lock to prevent race with finalization timer
+        Includes deduplication to filter duplicate trades from Bybit API (~9.4%)
         """
+        # Deduplication: Create unique signature for this trade
+        signature = f"{trade_data['timestamp']}_{trade_data['price']}_{trade_data['size']}"
+
+        # Check if we've already seen this exact trade
+        if signature in self._seen_trade_signatures[symbol]:
+            # Skip duplicate trade - already processed
+            return
+
+        # Mark this trade as seen
+        self._seen_trade_signatures[symbol].add(signature)
+
+        # Periodic cleanup: Remove old signatures to prevent memory growth
+        # Keep only signatures from last 60 seconds (6 candle intervals)
+        if len(self._seen_trade_signatures[symbol]) > 1000:
+            current_time_ms = trade_data['timestamp']
+            cutoff_time = current_time_ms - 60000  # 60 seconds ago
+            # Remove signatures for trades older than cutoff
+            self._seen_trade_signatures[symbol] = {
+                sig for sig in self._seen_trade_signatures[symbol]
+                if int(sig.split('_')[0]) >= cutoff_time
+            }
+
         candle_interval_ms = 10000  # 10-second candles
         trade_timestamp = trade_data['timestamp']
         candle_start_time = (trade_timestamp // candle_interval_ms) * candle_interval_ms
 
         async with self._candle_locks[symbol]:
-            current_data = self.current_candle_data[symbol]
+            # Use the trades_by_interval to store trades by their specific interval
+            interval_key = candle_start_time
+            if interval_key not in self._trades_by_interval[symbol]:
+                self._trades_by_interval[symbol][interval_key] = []
 
-            # Check if we need to start a new candle
-            if current_data['candle_start_time'] is None:
-                # First trade ever - start new candle
-                current_data['candle_start_time'] = candle_start_time
-                current_data['trades'] = [trade_data]
-            elif current_data['candle_start_time'] == candle_start_time:
-                # Same candle period - add trade
-                current_data['trades'].append(trade_data)
-            elif candle_start_time < current_data['candle_start_time']:
-                # Trade from past period - ignore (shouldn't happen)
-                pass
-            else:
-                # Trade from future period - means current candle period ended
-                # Timer will finalize old candle and we start accumulating for new period
-                current_data['candle_start_time'] = candle_start_time
-                current_data['trades'] = [trade_data]
+            # Add the trade to its specific interval
+            self._trades_by_interval[symbol][interval_key].append(trade_data)
+
+            # Update the candle_start_time if this is the first trade or a newer interval
+            if (self.current_candle_data[symbol]['candle_start_time'] is None or
+                candle_start_time > self.current_candle_data[symbol]['candle_start_time']):
+                self.current_candle_data[symbol]['candle_start_time'] = candle_start_time
 
     def get_signal_data(self, symbol: str) -> Tuple[bool, Dict]:
         """

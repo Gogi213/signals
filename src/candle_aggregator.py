@@ -27,6 +27,11 @@ def create_candle_from_trades(trades: List[Dict], timestamp: int) -> Dict:
     low_price = min(prices)
     total_volume = sum(volumes)
 
+    # Debug logging for volume aggregation
+    # print(f"DEBUG: Created candle for timestamp {timestamp} with {len(trades)} trades, total volume: {total_volume}")
+    # if volumes:
+    #     print(f"DEBUG: Individual volumes: {volumes}")
+
     return {
         'timestamp': timestamp,
         'open': open_price,

@@ -3,7 +3,7 @@ Main application file for the trading signals system
 """
 import asyncio
 import time
-import logging
+# import logging
 from typing import List, Dict
 
 from src.websocket_handler import TradeWebSocket
@@ -17,7 +17,7 @@ from src.trading_api import get_all_symbols_by_volume
 
 # Setup JSON logging
 setup_logging()
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
 async def send_signal(url: str, strategy_name: str, coin: str, signal: bool):
@@ -97,7 +97,7 @@ async def main():
                 if (signal_info and signal_info.get('candle_count', 0) == 0 and
                     time_since_start > 600):  # 10 minutes with no data
                     excluded_coins.add(coin)
-                    logger.warning(f"Excluding {coin} - no trading data for {time_since_start:.0f}s")
+                    # logger.warning(f"Excluding {coin} - no trading data for {time_since_start:.0f}s")
                     continue
 
                 # Check if any coin is still warming up
@@ -113,6 +113,8 @@ async def main():
 
                 # Only log and send if signal changed or first time
                 if prev_signal is None or prev_signal != signal:
+                    # Log signal regardless of whether it's True or False
+                    from src.config import log_signal
                     log_signal(coin, signal, signal_info)
 
                     if signal:
@@ -133,9 +135,9 @@ async def main():
             await asyncio.sleep(0.3)
     
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        pass  # logger.info("Shutting down...")
     except Exception as e:
-        logger.error(f"Error: {e}")
+        pass  # logger.error(f"Error: {e}")
     finally:
         # Stop the WebSocket connection after processing
         await aggregator.stop()

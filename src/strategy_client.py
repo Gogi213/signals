@@ -21,10 +21,10 @@ class StrategyRunner:
                 return  # Success
             except Exception as e:
                 if attempt < max_retries - 1:
-                    print(f"Error sending data: {e}. Retry {attempt + 1}/{max_retries - 1} in 2 seconds.")
+                    pass  # print(f"Error sending data: {e}. Retry {attempt + 1}/{max_retries - 1} in 2 seconds.")
                     await asyncio.sleep(2)  # Short delay for fast recovery
                 else:
-                    print(f"Error sending data after {max_retries} attempts: {e}. Giving up.")
+                    pass  # print(f"Error sending data after {max_retries} attempts: {e}. Giving up.")
                     # Don't block - let other signals process
     
     async def _send_strategy(self, strategy_name: str):
@@ -58,14 +58,14 @@ class StrategyRunner:
         if response.status == 200:
             if 'application/json' in response.headers.get('Content-Type', ''):
                 result = await response.json()
-                print("Executed:", result)
+                pass  # print("Executed:", result)
             else:
                 result = await response.text()
-                print("Executed:", result)
+                pass  # print("Executed:", result)
         else:
-            print(f"Error: {response.status}")
-            text = await response.text()
-            print("Response:", text)
+            pass  # print(f"Error: {response.status}")
+            # text = await response.text()
+            pass  # print("Response:", text)
             
     async def call(self, strategy_name: str):
         """

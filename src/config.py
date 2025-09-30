@@ -3,7 +3,7 @@ Configuration module - direct settings without environment variables
 """
 import os
 import json
-import logging
+# import logging
 from datetime import datetime
 from typing import List
 
@@ -43,23 +43,25 @@ def build_strategy_url(server_ip: str) -> str:
 
 # Logging configuration
 LOG_LEVEL = 'INFO'
+LOGS_DIR = 'logs'
 
 # Create logs directory if it doesn't exist
-LOGS_DIR = 'logs'
 if not os.path.exists(LOGS_DIR):
     os.makedirs(LOGS_DIR)
 
-class JSONFormatter(logging.Formatter):
-    """Custom JSON formatter for clean structured logging"""
+
+class JSONFormatter:
+    """Custom JSON formatter for structured logging to files"""
 
     def format(self, record):
+        """Format log record as JSON"""
         log_entry = {
             'timestamp': datetime.now().isoformat(),
             'level': record.levelname,
             'message': record.getMessage()
         }
 
-        # Add essential fields only
+        # Add custom fields if present
         if hasattr(record, 'coin'):
             log_entry['coin'] = record.coin
         if hasattr(record, 'signal_type'):
@@ -71,158 +73,152 @@ class JSONFormatter(logging.Formatter):
 
         return json.dumps(log_entry, ensure_ascii=False)
 
+
+class JSONFileHandler:
+    """Custom file handler that writes JSON formatted logs"""
+
+    def __init__(self, filename):
+        """Initialize handler with filename"""
+        self.filename = filename
+        self.formatter = JSONFormatter()
+
+    def emit(self, record):
+        """Write log record to file"""
+        try:
+            log_line = self.formatter.format(record)
+            with open(self.filename, 'a', encoding='utf-8') as f:
+                f.write(log_line + '\n')
+        except Exception:
+            pass  # Silently ignore logging errors
+
+
 def setup_logging():
-    """Setup separated logging to different files and console"""
+    """Setup logging - console only (file logging done via custom handlers)"""
+    import logging
 
-    # Create handlers for different log categories
-    system_handler = logging.FileHandler(f'{LOGS_DIR}/system.json', encoding='utf-8')
-    system_handler.setFormatter(JSONFormatter())
-    system_handler.setLevel(logging.INFO)
+    # Console formatter
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
-    signals_handler = logging.FileHandler(f'{LOGS_DIR}/signals.json', encoding='utf-8')
-    signals_handler.setFormatter(JSONFormatter())
-    signals_handler.setLevel(logging.INFO)
-
-    websocket_handler = logging.FileHandler(f'{LOGS_DIR}/websocket.json', encoding='utf-8')
-    websocket_handler.setFormatter(JSONFormatter())
-    websocket_handler.setLevel(logging.INFO)
-
-    # Create console handler with simple format
+    # Console handler
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
 
-    # Configure root logger (system events)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.handlers = []  # Clear existing handlers
-    root_logger.addHandler(system_handler)
-    root_logger.addHandler(console_handler)
+    # Setup root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(console_handler)
 
-    # Configure signals logger
-    signals_logger = logging.getLogger('signals')
-    signals_logger.setLevel(logging.INFO)
-    signals_logger.handlers = []
-    signals_logger.addHandler(signals_handler)
-    signals_logger.addHandler(console_handler)  # Also to console
-    signals_logger.propagate = False  # Don't propagate to root
-
-    # Configure websocket logger
-    ws_logger = logging.getLogger('websocket')
-    ws_logger.setLevel(logging.INFO)
-    ws_logger.handlers = []
-    ws_logger.addHandler(websocket_handler)
-    ws_logger.addHandler(console_handler)  # Also to console
-    ws_logger.propagate = False  # Don't propagate to root
-
-    # Disable debug logs from external libraries
-    logging.getLogger('websockets').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logging.getLogger('asyncio').setLevel(logging.WARNING)
 
 def log_signal(coin: str, signal: bool, signal_data: dict = None):
     """
     Log trading signal with full details for all criteria
     Skips warmup/insufficient data logs but logs ALL post-warmup signals
     """
-    signals_logger = logging.getLogger('signals')
-
-    # Skip only warmup and insufficient data logs
-    if signal_data and 'criteria' in signal_data:
-        criteria = signal_data['criteria']
-        validation_error = criteria.get('validation_error', '')
-        if validation_error:  # Skip warmup/insufficient data
+    import logging
+    
+    if signal_data and 'validation_error' in signal_data:
+        validation_error = signal_data['validation_error']
+        if validation_error and validation_error.startswith('Warmup:'):
+            # Skip warmup logs
             return
-
-    # Log ALL signals after warmup with full details
-    signal_text = "BUY" if signal else "NO"
-
-    # Build detailed message
-    parts = [f"{coin} | SIGNAL: {signal_text}"]
-
+    
+    logger = logging.getLogger(__name__)
+    
     if signal_data and 'criteria' in signal_data:
         criteria = signal_data['criteria']
-
-        # Get detailed criteria if available
+        candle_count = signal_data.get('candle_count', 0)
+        
+        # Prepare criteria details
         if 'criteria_details' in criteria:
-            details = criteria['criteria_details']
+            # Detailed criteria logging
+            criteria_details = criteria['criteria_details']
+            failed_criteria = []
+            passed_criteria = []
+            
+            for crit_name, details in criteria_details.items():
+                if details.get('passed', False):
+                    passed_criteria.append(f"{crit_name}({details.get('current', 'N/A')})")
+                else:
+                    failed_criteria.append(f"{crit_name}({details.get('current', 'N/A')} vs {details.get('threshold', 'N/A')})")
+            
+            # Format the log message
+            status = "✅ SIGNAL" if signal else "❌ NO SIGNAL"
+            passed_str = ", ".join(passed_criteria) if passed_criteria else "none"
+            failed_str = ", ".join(failed_criteria) if failed_criteria else "none"
+            
+            logger.info(f"📊 {status} for {coin} | Candles: {candle_count} | "
+                       f"Passed: [{passed_str}] | Failed: [{failed_str}]")
+        else:
+            # Simple criteria logging
+            low_vol = criteria.get('low_vol', False)
+            narrow_rng = criteria.get('narrow_rng', False)
+            high_natr = criteria.get('high_natr', False)
+            growth_filter = criteria.get('growth_filter', False)
+            
+            failed_criteria = []
+            passed_criteria = []
+            
+            if low_vol: passed_criteria.append("low_vol");
+            else: failed_criteria.append("low_vol")
+            if narrow_rng: passed_criteria.append("narrow_rng");
+            else: failed_criteria.append("narrow_rng")
+            if high_natr: passed_criteria.append("high_natr");
+            else: failed_criteria.append("high_natr")
+            if growth_filter: passed_criteria.append("growth_filter");
+            else: failed_criteria.append("growth_filter")
+            
+            status = "✅ SIGNAL" if signal else "❌ NO SIGNAL"
+            passed_str = ", ".join(passed_criteria) if passed_criteria else "none"
+            failed_str = ", ".join(failed_criteria) if failed_criteria else "none"
+            
+            logger.info(f"📊 {status} for {coin} | Candles: {candle_count} | "
+                       f"Passed: [{passed_str}] | Failed: [{failed_str}]")
+    else:
+        status = "✅ SIGNAL" if signal else "❌ NO SIGNAL"
+        logger.info(f"📊 {status} for {coin}")
 
-            # Format each criterion with numbers
-            for criterion_name, criterion_data in details.items():
-                if criterion_data:
-                    passed = criterion_data.get('passed', False)
-                    status = "PASS" if passed else "FAIL"
-                    current = criterion_data.get('current', 0)
-                    threshold = criterion_data.get('threshold', 0)
-
-                    # Format numbers nicely based on magnitude
-                    if isinstance(current, float):
-                        if abs(current) < 0.01:
-                            current_str = f"{current:.6f}"
-                        elif abs(current) < 1:
-                            current_str = f"{current:.4f}"
-                        else:
-                            current_str = f"{current:.2f}"
-                    else:
-                        current_str = str(current)
-
-                    if isinstance(threshold, float):
-                        if abs(threshold) < 0.01:
-                            threshold_str = f"{threshold:.6f}"
-                        elif abs(threshold) < 1:
-                            threshold_str = f"{threshold:.4f}"
-                        else:
-                            threshold_str = f"{threshold:.2f}"
-                    else:
-                        threshold_str = str(threshold)
-
-                    parts.append(f"{criterion_name}:{status}({current_str}/{threshold_str})")
-
-    message = " | ".join(parts)
-
-    # Add structured data using 'extra' parameter
-    extra_data = {
-        'coin': coin,
-        'signal_type': signal_text
-    }
-
-    if signal_data and 'criteria' in signal_data:
-        criteria = signal_data['criteria']
-        if 'criteria_details' in criteria:
-            extra_data['criteria_details'] = criteria['criteria_details']
-
-        # Add list of failed criteria for easy filtering
-        extra_data['failed_criteria'] = [k for k, v in criteria.items()
-                                         if k in ['low_vol', 'narrow_rng', 'high_natr', 'growth_filter'] and not v]
-
-    signals_logger.info(message, extra=extra_data)
 
 def log_connection_info(coin_count: int):
     """Log connection information"""
-    logger = logging.getLogger()  # System logger
-    logger.info(f"WebSocket connections established for {coin_count} coins")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🔗 Connected to WebSocket for {coin_count} coins")
+
 
 def log_warmup_progress(current_candles: int, required_candles: int):
     """Log warmup progress periodically"""
-    logger = logging.getLogger()  # System logger
-    progress_pct = (current_candles / required_candles) * 100 if required_candles > 0 else 0
-    logger.info(f"Warmup progress: {current_candles}/{required_candles} candles ({progress_pct:.0f}%)")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🔥 Warmup: {current_candles}/{required_candles} candles completed")
+
 
 def log_reconnect(connection_id: str, reason: str = ""):
     """Log reconnection attempts"""
-    logger = logging.getLogger('websocket')
-    message = f"WebSocket reconnecting: {connection_id}"
-    if reason:
-        message += f" - {reason}"
-    logger.warning(message)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"🔄 Reconnecting {connection_id}: {reason}")
+
 
 def log_websocket_event(message: str, level: str = 'INFO'):
     """Log websocket events"""
-    logger = logging.getLogger('websocket')
-    if level.upper() == 'WARNING':
-        logger.warning(message)
-    elif level.upper() == 'ERROR':
-        logger.error(message)
+    import logging
+    logger = logging.getLogger(__name__)
+    if level == 'WARNING':
+        logger.warning(f"📡 {message}")
     else:
-        logger.info(message)
+        logger.info(f"📡 {message}")
+
+
+def log_new_candle(coin: str, candle_data: dict):
+    """Log new candle data"""
+    import logging
+    from datetime import datetime
+    logger = logging.getLogger(__name__)
+    
+    if candle_data:
+        timestamp = datetime.fromtimestamp(candle_data['timestamp']/1000).strftime('%H:%M:%S')
+        logger.info(f"🕯️  {coin} | {timestamp} | O:{candle_data['open']:.4f} H:{candle_data['high']:.4f} L:{candle_data['low']:.4f} C:{candle_data['close']:.4f} V:{candle_data['volume']:.2f}")
