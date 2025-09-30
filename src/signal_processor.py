@@ -4,7 +4,6 @@ Module for processing trading signals based on specified conditions
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Tuple
-from .candle_aggregator import aggregate_trades_to_candles
 
 
 def calculate_atr(candles: List[Dict], period: int = 14) -> List[float]:
@@ -192,6 +191,11 @@ def generate_signal(candles: List[Dict]) -> Tuple[bool, Dict]:
         detailed_info['validation_error'] = f'Insufficient data: {len(candles)} candles (need 20+)'
         return False, detailed_info
 
+    # Check if last candle has zero volume (forward-fill) - no signal for inactive markets
+    if candles[-1]['volume'] == 0:
+        detailed_info['validation_error'] = 'No trades in last candle (forward-fill)'
+        return False, detailed_info
+
     # Validate candle data to prevent negative ranges
     for i, candle in enumerate(candles):
         if candle['high'] < candle['low']:
@@ -228,23 +232,3 @@ def generate_signal(candles: List[Dict]) -> Tuple[bool, Dict]:
     return final_signal, detailed_info
 
 
-def process_trades_for_signals(trades: List[Dict],
-                              timeframe_ms: int = 10000) -> Tuple[bool, Dict]:
-    """
-    Process trades and generate signals based on conditions
-    """
-    # Aggregate trades to candles
-    candles = aggregate_trades_to_candles(trades, timeframe_ms)
-
-    # Generate signal with detailed info
-    signal, detailed_info = generate_signal(candles)
-
-    # Prepare comprehensive signal data
-    signal_data = {
-        'signal': signal,
-        'candle_count': len(candles),
-        'last_candle': candles[-1] if candles else None,
-        'criteria': detailed_info
-    }
-
-    return signal, signal_data

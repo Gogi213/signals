@@ -42,12 +42,12 @@ pip install -r requirements.txt
 
 1. **main.py** - Application entry point and main event loop
    - Orchestrates WebSocket connections, signal processing, and strategy communication
-   - Handles warmup period (70 intervals) before sending signals
-   - Filters coins by volume (MIN_DAILY_VOLUME = 60M) and blacklist
+   - Handles warmup period (25 intervals) before sending signals
+   - Filters coins by volume (MIN_DAILY_VOLUME = 150M) and blacklist
 
 2. **src/websocket_handler.py** - WebSocket connection management
    - `TradeWebSocket` class handles multiple connections to Bybit streams
-   - Distributes symbols across connections (max 20 coins per connection, 12 max connections)
+   - Distributes symbols across connections (max 3 coins per connection, 20 max connections)
    - Buffers trade data into 10-second candles with rolling 100-candle limit
 
 3. **src/candle_aggregator.py** - Trade data aggregation
@@ -74,9 +74,9 @@ pip install -r requirements.txt
 
 - **Strategy Names**: Configured in `DEFAULT_STRATEGY_NAMES` (currently: ['xxx'])
 - **Server URLs**: Listed in `DEFAULT_SERVER_URLS` (localhost, 192.168.1.100)
-- **Volume Filter**: `MIN_DAILY_VOLUME = 60000000` (60M)
+- **Volume Filter**: `MIN_DAILY_VOLUME = 150000000` (150M)
 - **Blacklisted Coins**: Major pairs excluded from trading (BTC, ETH, SOL, etc.)
-- **Warmup Period**: 70 intervals before signals activate
+- **Warmup Period**: 25 intervals before signals activate (~4.2 minutes)
 - **Candle Interval**: 10 seconds per candle
 - **WebSocket URL**: `wss://stream.bybit.com/v5/public/linear`
 
@@ -101,7 +101,7 @@ The system uses structured JSON logging with three separate log files:
 
 ### Important Notes
 
-- The system requires a 70-interval warmup period before generating signals
+- The system requires a 25-interval warmup period before generating signals
 - Coins with no trading data for 10+ minutes are automatically excluded
 - All signals are sent to multiple strategy servers simultaneously
 - The application runs continuously with 0.3-second processing intervals

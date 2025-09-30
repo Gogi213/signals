@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List
 
 # Volume filter settings
-MIN_DAILY_VOLUME = 60000000
+MIN_DAILY_VOLUME = 150000000
 
 # Blacklist configuration - coins to exclude from trading
 BLACKLISTED_COINS = ['BTCUSDT','BTCPERP','ETHUSDT','SOLUSDT','XRPUSDT','LTCUSDT','ADAUSDT','DOGEUSDT','DOTUSDT','TRXUSDT']
@@ -181,31 +181,22 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None):
 
     message = " | ".join(parts)
 
-    # Create structured log record for JSON
-    record = logging.LogRecord(
-        name=signals_logger.name,
-        level=logging.INFO,
-        pathname='',
-        lineno=0,
-        msg=message,
-        args=(),
-        exc_info=None
-    )
-
-    # Add structured data for JSON output
-    record.coin = coin
-    record.signal_type = signal_text
+    # Add structured data using 'extra' parameter
+    extra_data = {
+        'coin': coin,
+        'signal_type': signal_text
+    }
 
     if signal_data and 'criteria' in signal_data:
         criteria = signal_data['criteria']
         if 'criteria_details' in criteria:
-            record.criteria_details = criteria['criteria_details']
+            extra_data['criteria_details'] = criteria['criteria_details']
 
         # Add list of failed criteria for easy filtering
-        record.failed_criteria = [k for k, v in criteria.items()
-                                 if k in ['low_vol', 'narrow_rng', 'high_natr', 'growth_filter'] and not v]
+        extra_data['failed_criteria'] = [k for k, v in criteria.items()
+                                         if k in ['low_vol', 'narrow_rng', 'high_natr', 'growth_filter'] and not v]
 
-    signals_logger.info(message)
+    signals_logger.info(message, extra=extra_data)
 
 def log_connection_info(coin_count: int):
     """Log connection information"""

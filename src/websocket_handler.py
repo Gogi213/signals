@@ -8,9 +8,7 @@ import json
 import logging
 import time
 from typing import List, Dict, Callable, Optional, Tuple
-from src.trading_api import get_recent_trades, filter_symbols_by_volume
-from src.candle_aggregator import aggregate_trades_to_candles, create_candle_from_trades
-from src.signal_processor import process_trades_for_signals
+from src.candle_aggregator import create_candle_from_trades
 from src.config import WARMUP_INTERVALS, log_websocket_event, log_reconnect
 
 # Configure logging
@@ -23,8 +21,7 @@ class TradeWebSocket:
         Initialize WebSocket connections for trade data
         Uses multiple connections to distribute symbols and avoid limits
         """
-        # Filter coins by volume before initializing
-        self.coins = filter_symbols_by_volume(coins)
+        self.coins = coins
         self.ws_url = ws_url
         self.max_connections = max_connections
         self.max_coins_per_connection = max_coins_per_connection
@@ -34,6 +31,7 @@ class TradeWebSocket:
         self.running = False
         self._connection_tasks = []  # Track connection tasks for graceful shutdown
         self._start_time = time.time() # Track when system started for warmup
+        self._candle_locks = {}         # Locks to prevent race conditions during finalization
 
         # Initialize candle buffers for each coin
         for coin in self.coins:
@@ -44,6 +42,7 @@ class TradeWebSocket:
                 'last_finalized_boundary': 0,      # Track last finalized boundary to prevent gaps
                 'last_close_price': None           # For forward-fill when no trades
             }
+            self._candle_locks[coin] = asyncio.Lock()  # Lock for each coin
 
         # Event handlers for connection events
         self.on_connect: Optional[Callable] = None
@@ -145,9 +144,9 @@ class TradeWebSocket:
                                                 'side': trade['S']
                                             }
 
-                                            # Process trade incrementally into candles
+                                            # Process trade incrementally into candles with lock
                                             if symbol in self.current_candle_data:
-                                                self._process_trade_to_candle(symbol, trade_data)
+                                                await self._process_trade_to_candle(symbol, trade_data)
                                             else:
                                                 logger.warning(f"⚠️ Symbol {symbol} not in current_candle_data!")
                                         except (KeyError, ValueError, TypeError) as e:
@@ -159,7 +158,7 @@ class TradeWebSocket:
                             # Send ping to check if connection is alive
                             try:
                                 await websocket.ping()
-                            except:
+                            except Exception:
                                 log_websocket_event(f"Connection {connection_id}: Ping failed, reconnecting", 'WARNING')
                                 break
                         except websockets.exceptions.ConnectionClosed:
@@ -255,72 +254,74 @@ class TradeWebSocket:
                     if symbol not in self.current_candle_data:
                         continue
 
-                    current_data = self.current_candle_data[symbol]
-                    last_boundary = current_data['last_finalized_boundary']
+                    # Lock access to prevent race with trade processing
+                    async with self._candle_locks[symbol]:
+                        current_data = self.current_candle_data[symbol]
+                        last_boundary = current_data['last_finalized_boundary']
 
-                    # If first candle ever, wait for first trade
-                    if last_boundary == 0 and current_data['candle_start_time'] is None:
-                        continue
-
-                    # Set starting boundary
-                    if last_boundary == 0:
-                        # First candle - use the candle_start_time from first trade
-                        last_boundary = current_data['candle_start_time']
-
-                    # Create ALL candles from last_boundary to current_boundary
-                    boundary = last_boundary
-                    while boundary < current_boundary:
-                        # Check if we have trades for this specific boundary
-                        if (current_data['candle_start_time'] == boundary and
-                            current_data['trades']):
-                            # Have trades for this period - create real candle
-                            completed_candle = create_candle_from_trades(
-                                current_data['trades'],
-                                boundary
-                            )
-                            # Update last close price for future forward-fill
-                            current_data['last_close_price'] = completed_candle['close']
-
-                        elif current_data['last_close_price'] is not None:
-                            # No trades for this period - forward-fill with last price
-                            completed_candle = {
-                                'timestamp': boundary,
-                                'open': current_data['last_close_price'],
-                                'high': current_data['last_close_price'],
-                                'low': current_data['last_close_price'],
-                                'close': current_data['last_close_price'],
-                                'volume': 0
-                            }
-                        else:
-                            # No trades and no last price - skip this boundary
-                            boundary += candle_interval_ms
+                        # If first candle ever, wait for first trade
+                        if last_boundary == 0 and current_data['candle_start_time'] is None:
                             continue
 
-                        # Append candle to buffer
-                        self.candles_buffer[symbol].append(completed_candle)
+                        # Set starting boundary
+                        if last_boundary == 0:
+                            # First candle - use the candle_start_time from first trade
+                            last_boundary = current_data['candle_start_time']
 
-                        # Move to next boundary
-                        boundary += candle_interval_ms
+                        # Create ALL candles from last_boundary to current_boundary
+                        boundary = last_boundary
+                        while boundary < current_boundary:
+                            # Check if we have trades for this specific boundary
+                            if (current_data['candle_start_time'] == boundary and
+                                current_data['trades']):
+                                # Have trades for this period - create real candle
+                                completed_candle = create_candle_from_trades(
+                                    current_data['trades'],
+                                    boundary
+                                )
+                                # Update last close price for future forward-fill
+                                current_data['last_close_price'] = completed_candle['close']
 
-                    # Log only the LAST created candle to avoid spam
-                    candle_count = len(self.candles_buffer[symbol])
-                    if candle_count > 0:
-                        last_candle = self.candles_buffer[symbol][-1]
-                        if candle_count <= 5 or candle_count % 10 == 0:
-                            volume_str = f"vol:{last_candle['volume']:.0f}" if last_candle['volume'] > 0 else "forward-fill"
-                            logger.info(f"🕰️ {symbol}: Candle #{candle_count} | Price: {last_candle['close']} | {volume_str}")
+                            elif current_data['last_close_price'] is not None:
+                                # No trades for this period - forward-fill with last price
+                                completed_candle = {
+                                    'timestamp': boundary,
+                                    'open': current_data['last_close_price'],
+                                    'high': current_data['last_close_price'],
+                                    'low': current_data['last_close_price'],
+                                    'close': current_data['last_close_price'],
+                                    'volume': 0
+                                }
+                            else:
+                                # No trades and no last price - skip this boundary
+                                boundary += candle_interval_ms
+                                continue
 
-                    # Trim buffer ONCE after all candles created
-                    if len(self.candles_buffer[symbol]) > WARMUP_INTERVALS:
-                        self.candles_buffer[symbol] = self.candles_buffer[symbol][-WARMUP_INTERVALS:]
+                            # Append candle to buffer
+                            self.candles_buffer[symbol].append(completed_candle)
 
-                    # Update last finalized boundary
-                    current_data['last_finalized_boundary'] = current_boundary
+                            # Move to next boundary
+                            boundary += candle_interval_ms
 
-                    # Reset current candle data if it was finalized
-                    if current_data['candle_start_time'] is not None and current_data['candle_start_time'] < current_boundary:
-                        current_data['trades'] = []
-                        current_data['candle_start_time'] = None
+                        # Log only the LAST created candle to avoid spam
+                        candle_count = len(self.candles_buffer[symbol])
+                        if candle_count > 0:
+                            last_candle = self.candles_buffer[symbol][-1]
+                            if candle_count <= 5 or candle_count % 10 == 0:
+                                volume_str = f"vol:{last_candle['volume']:.0f}" if last_candle['volume'] > 0 else "forward-fill"
+                                logger.info(f"🕰️ {symbol}: Candle #{candle_count} | Price: {last_candle['close']} | {volume_str}")
+
+                        # Trim buffer ONCE after all candles created
+                        if len(self.candles_buffer[symbol]) > WARMUP_INTERVALS:
+                            self.candles_buffer[symbol] = self.candles_buffer[symbol][-WARMUP_INTERVALS:]
+
+                        # Update last finalized boundary
+                        current_data['last_finalized_boundary'] = current_boundary
+
+                        # Reset current candle data if it was finalized
+                        if current_data['candle_start_time'] is not None and current_data['candle_start_time'] < current_boundary:
+                            current_data['trades'] = []
+                            current_data['candle_start_time'] = None
 
                 # Wait exactly 10 seconds until next boundary
                 await asyncio.sleep(10.0)
@@ -331,33 +332,35 @@ class TradeWebSocket:
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(10.0)  # Continue with normal interval
 
-    def _process_trade_to_candle(self, symbol: str, trade_data: Dict):
+    async def _process_trade_to_candle(self, symbol: str, trade_data: Dict):
         """
         Add trades to current candle - timer handles synchronized finalization
         Trades are accumulated until timer creates the candle
+        Uses lock to prevent race with finalization timer
         """
         candle_interval_ms = 10000  # 10-second candles
         trade_timestamp = trade_data['timestamp']
         candle_start_time = (trade_timestamp // candle_interval_ms) * candle_interval_ms
 
-        current_data = self.current_candle_data[symbol]
+        async with self._candle_locks[symbol]:
+            current_data = self.current_candle_data[symbol]
 
-        # Check if we need to start a new candle
-        if current_data['candle_start_time'] is None:
-            # First trade ever - start new candle
-            current_data['candle_start_time'] = candle_start_time
-            current_data['trades'] = [trade_data]
-        elif current_data['candle_start_time'] == candle_start_time:
-            # Same candle period - add trade
-            current_data['trades'].append(trade_data)
-        elif candle_start_time < current_data['candle_start_time']:
-            # Trade from past period - ignore (shouldn't happen)
-            pass
-        else:
-            # Trade from future period - means current candle period ended
-            # Timer will finalize old candle and we start accumulating for new period
-            current_data['candle_start_time'] = candle_start_time
-            current_data['trades'] = [trade_data]
+            # Check if we need to start a new candle
+            if current_data['candle_start_time'] is None:
+                # First trade ever - start new candle
+                current_data['candle_start_time'] = candle_start_time
+                current_data['trades'] = [trade_data]
+            elif current_data['candle_start_time'] == candle_start_time:
+                # Same candle period - add trade
+                current_data['trades'].append(trade_data)
+            elif candle_start_time < current_data['candle_start_time']:
+                # Trade from past period - ignore (shouldn't happen)
+                pass
+            else:
+                # Trade from future period - means current candle period ended
+                # Timer will finalize old candle and we start accumulating for new period
+                current_data['candle_start_time'] = candle_start_time
+                current_data['trades'] = [trade_data]
 
     def get_signal_data(self, symbol: str) -> Tuple[bool, Dict]:
         """
@@ -385,9 +388,17 @@ class TradeWebSocket:
 
             # Now check if we have enough for signal calculation (20+ for technical indicators)
             if len(candles) >= 20:
-                # Convert candles to trades format for signal_processor compatibility
-                fake_trades = self._candles_to_trades_format(candles)
-                return process_trades_for_signals(fake_trades, 10000)
+                # Use candles directly - no conversion needed
+                from src.signal_processor import generate_signal
+                signal, detailed_info = generate_signal(candles)
+
+                signal_data = {
+                    'signal': signal,
+                    'candle_count': len(candles),
+                    'last_candle': candles[-1] if candles else None,
+                    'criteria': detailed_info
+                }
+                return signal, signal_data
             else:
                 return False, {
                     'signal': False,
@@ -403,29 +414,7 @@ class TradeWebSocket:
                     }
                 }
 
-        # If no websocket data, fetch from REST API as fallback
-        trades = get_recent_trades(symbol, limit=100)
-        if trades and len(trades) > 20:
-            return process_trades_for_signals(trades, 10000)
-
-        # Return default values if insufficient data
         return False, {'signal': False, 'candle_count': 0, 'last_candle': None}
-
-    def _candles_to_trades_format(self, candles: List[Dict]) -> List[Dict]:
-        """
-        Convert candles back to a trade-like format for compatibility with existing signal processor
-        This is a temporary solution until signal_processor is optimized to work with candles directly
-        """
-        trades = []
-        for candle in candles:
-            # Create a representative trade for each candle
-            trades.append({
-                'timestamp': candle['timestamp'],
-                'price': candle['close'],  # Use close price as representative
-                'size': candle['volume'],
-                'side': 'Buy'  # Doesn't matter for signal processing
-            })
-        return trades
 
     async def stop(self):
         """

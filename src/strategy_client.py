@@ -14,14 +14,18 @@ class StrategyRunner:
         """
         self.strategy_url = strategy_url
     
-    async def send_strategy_with_retry(self, strategy_data: Dict[str, Any]):
-        while True:
+    async def send_strategy_with_retry(self, strategy_data: Dict[str, Any], max_retries: int = 3):
+        for attempt in range(max_retries):
             try:
                 await self._send_json_strategy(strategy_data)
-                break  # If sending is successful, exit the loop
+                return  # Success
             except Exception as e:
-                print(f"Error sending data: {e}. Retrying in 10 seconds.")
-                await asyncio.sleep(10)  # Wait 10 seconds before retry
+                if attempt < max_retries - 1:
+                    print(f"Error sending data: {e}. Retry {attempt + 1}/{max_retries - 1} in 2 seconds.")
+                    await asyncio.sleep(2)  # Short delay for fast recovery
+                else:
+                    print(f"Error sending data after {max_retries} attempts: {e}. Giving up.")
+                    # Don't block - let other signals process
     
     async def _send_strategy(self, strategy_name: str):
         """

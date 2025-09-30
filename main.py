@@ -63,6 +63,7 @@ async def main():
     # Track coins with no data during warmup period
     excluded_coins = set()
     coin_first_seen = {}  # Track when each coin was first processed
+    coin_last_signal = {}  # Track last signal state to avoid spam
 
     # Log connection info
     log_connection_info(len(filtered_coins))
@@ -104,20 +105,27 @@ async def main():
                     criteria = signal_info['criteria']
                     if criteria.get('validation_error', '').startswith('Warmup:'):
                         warmup_active = True
-                        candle_count = criteria.get('candle_count', 0)
+                        candle_count = signal_info.get('candle_count', 0)
                         min_candles = min(min_candles, candle_count)
 
-                # Log and send signal
-                log_signal(coin, signal, signal_info)
+                # Check if signal changed (only send on change)
+                prev_signal = coin_last_signal.get(coin, None)
 
-                if signal:
-                    await send_signals_loop(coin, signal)
-                    # Small delay to avoid overwhelming the system
-                    await asyncio.sleep(0.1)
+                # Only log and send if signal changed or first time
+                if prev_signal is None or prev_signal != signal:
+                    log_signal(coin, signal, signal_info)
 
-            # Log warmup progress every 10 intervals
+                    if signal:
+                        await send_signals_loop(coin, signal)
+                        # Small delay to avoid overwhelming the system
+                        await asyncio.sleep(0.1)
+
+                    # Update last signal state
+                    coin_last_signal[coin] = signal
+
+            # Log warmup progress every 10 intervals (or on first candle)
             if warmup_active and min_candles != float('inf'):
-                if min_candles - last_warmup_log >= 10 or min_candles == 1:
+                if min_candles - last_warmup_log >= 10 or (min_candles == 1 and last_warmup_log == 0):
                     log_warmup_progress(min_candles, WARMUP_INTERVALS)
                     last_warmup_log = min_candles
 
