@@ -11,7 +11,7 @@ from src.strategy_client import StrategyRunner
 from src.config import (
     DEFAULT_STRATEGY_NAMES, DEFAULT_SERVER_URLS, DEFAULT_UPDATE_INTERVAL,
     MIN_DAILY_VOLUME, build_strategy_url, setup_logging, log_signal, log_connection_info,
-    log_warmup_progress, WARMUP_INTERVALS
+    log_warmup_progress, WARMUP_INTERVALS, start_candle_logging
 )
 from src.trading_api import get_all_symbols_by_volume
 
@@ -54,6 +54,9 @@ async def main():
     """
     Main function to run the trading signals system
     """
+    # Start async candle logging worker
+    start_candle_logging()
+
     # Get all symbols and filter by volume before creating WebSocket aggregator
     filtered_coins = get_all_symbols_by_volume()
 
@@ -73,14 +76,17 @@ async def main():
     
     # Keep the connection running and process signals in real-time
     last_warmup_log = 0
+    warmup_complete = False
     try:
         while True:
             # Check for signals for all symbols in real-time
             warmup_active = False
             min_candles = float('inf')
 
+            # Collect all signal data first to determine warmup status
+            coin_signals = {}
+
             for coin in filtered_coins:
-                # Skip excluded coins
                 if coin in excluded_coins:
                     continue
 
@@ -92,15 +98,17 @@ async def main():
                 # Get signal data for the coin
                 signal, signal_info = aggregator.get_signal_data(coin)
 
-                # Check if coin has no data for too long during warmup (exclude after 10 minutes)
+                # Check if coin has no data for too long (exclude after 10 minutes)
                 time_since_start = current_time - coin_first_seen[coin]
                 if (signal_info and signal_info.get('candle_count', 0) == 0 and
-                    time_since_start > 600):  # 10 minutes with no data
+                    time_since_start > 600):
                     excluded_coins.add(coin)
-                    # logger.warning(f"Excluding {coin} - no trading data for {time_since_start:.0f}s")
                     continue
 
-                # Check if any coin is still warming up
+                # Store signal data for processing
+                coin_signals[coin] = (signal, signal_info)
+
+                # Check warmup status
                 if signal_info and 'criteria' in signal_info:
                     criteria = signal_info['criteria']
                     if criteria.get('validation_error', '').startswith('Warmup:'):
@@ -108,26 +116,28 @@ async def main():
                         candle_count = signal_info.get('candle_count', 0)
                         min_candles = min(min_candles, candle_count)
 
-                # Check if signal changed (only send on change)
+            # Update warmup_complete flag before processing signals
+            if not warmup_active and not warmup_complete:
+                warmup_complete = True
+
+            # Process all signals with correct warmup_complete flag
+            for coin, (signal, signal_info) in coin_signals.items():
                 prev_signal = coin_last_signal.get(coin, None)
 
-                # Only log and send if signal changed or first time
-                if prev_signal is None or prev_signal != signal:
-                    # Log signal regardless of whether it's True or False
-                    from src.config import log_signal
-                    log_signal(coin, signal, signal_info)
+                # Log ALL signals (both TRUE and FALSE) to signals.json
+                from src.config import log_signal
+                log_signal(coin, signal, signal_info, warmup_complete)
 
-                    if signal:
-                        await send_signals_loop(coin, signal)
-                        # Small delay to avoid overwhelming the system
-                        await asyncio.sleep(0.1)
+                # Send signal only if it changed (to avoid spamming strategy servers)
+                if (prev_signal is None or prev_signal != signal) and signal:
+                    await send_signals_loop(coin, signal)
+                    await asyncio.sleep(0.1)
 
-                    # Update last signal state
-                    coin_last_signal[coin] = signal
+                coin_last_signal[coin] = signal
 
-            # Log warmup progress every 10 intervals (or on first candle)
+            # Log warmup progress every 5 intervals (or on first candle)
             if warmup_active and min_candles != float('inf'):
-                if min_candles - last_warmup_log >= 10 or (min_candles == 1 and last_warmup_log == 0):
+                if min_candles - last_warmup_log >= 5 or (min_candles == 1 and last_warmup_log == 0):
                     log_warmup_progress(min_candles, WARMUP_INTERVALS)
                     last_warmup_log = min_candles
 

@@ -34,6 +34,7 @@ class TradeWebSocket:
         self._candle_locks = {}         # Locks to prevent race conditions during finalization
         self._trades_by_interval = {}   # Store trades by 10-second intervals for each coin
         self._seen_trade_signatures = {}  # Track seen trades for deduplication (timestamp_price_size)
+        self._candle_sequence = 0       # Global sequence for log ordering
 
         # Initialize candle buffers for each coin
         for coin in self.coins:
@@ -93,16 +94,19 @@ class TradeWebSocket:
         topics = [f"publicTrade.{coin}" for coin in coins_for_connection]
         connection_id = f"{coins_for_connection[0]}-{coins_for_connection[-1] if len(coins_for_connection) > 1 else 'single'}"
 
-        reconnect_delay = 5  # Start with 5 seconds delay
-        max_reconnect_delay = 60  # Max 60 seconds delay
+        reconnect_delay = 1  # Fast initial reconnect (was 5)
+        max_reconnect_delay = 10  # Shorter max delay (was 60)
+        consecutive_failures = 0
 
         while self.running:
             try:
-                # Add timeout to connection
+                # Shorter timeout + ping/pong for faster dead connection detection
                 async with websockets.connect(
                     self.ws_url,
-                    timeout=30,  # 30 second timeout
-                    close_timeout=10
+                    timeout=10,  # Faster detection (was 30)
+                    ping_interval=20,  # Auto ping every 20s
+                    ping_timeout=10,  # Detect dead in 10s
+                    close_timeout=5
                 ) as websocket:
 
                     # Subscribe to trade streams
@@ -113,8 +117,9 @@ class TradeWebSocket:
                     await websocket.send(json.dumps(subscribe_msg))
                     # logger.info(f"📡 WebSocket {connection_id}: Subscribed to {len(coins_for_connection)} symbols: {coins_for_connection[:3]}...")
 
-                    # Reset reconnect delay on successful connection
-                    reconnect_delay = 5
+                    # Reset on successful connection
+                    reconnect_delay = 1
+                    consecutive_failures = 0
 
                     while self.running:
                         try:
@@ -162,13 +167,8 @@ class TradeWebSocket:
                                             continue
 
                         except asyncio.TimeoutError:
-                            log_websocket_event(f"Connection {connection_id}: Message timeout, checking connection", 'WARNING')
-                            # Send ping to check if connection is alive
-                            try:
-                                await websocket.ping()
-                            except Exception:
-                                log_websocket_event(f"Connection {connection_id}: Ping failed, reconnecting", 'WARNING')
-                                break
+                            # Auto ping/pong handles detection, just log and continue
+                            log_websocket_event(f"Connection {connection_id}: No messages for 60s", 'WARNING')
                         except websockets.exceptions.ConnectionClosed:
                             log_websocket_event(f"Connection {connection_id}: Connection closed", 'WARNING')
                             if self.on_disconnect:
@@ -182,29 +182,31 @@ class TradeWebSocket:
                             await asyncio.sleep(1)
 
             except websockets.exceptions.ConnectionClosed as e:
-                pass  # logger.warning(f"Connection {connection_id}: Connection closed ({e})")
+                consecutive_failures += 1
                 if self.on_disconnect:
                     self.on_disconnect()
             except websockets.exceptions.InvalidHandshake as e:
-                pass  # logger.error(f"Connection {connection_id}: Handshake failed ({e})")
-                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                consecutive_failures += 1
             except asyncio.TimeoutError:
-                pass  # logger.error(f"Connection {connection_id}: Connection timeout")
+                consecutive_failures += 1
             except OSError as e:
-                pass  # logger.error(f"Connection {connection_id}: Network error ({e})")
+                consecutive_failures += 1
             except Exception as e:
-                pass  # logger.error(f"Connection {connection_id}: Unexpected error: {type(e).__name__}: {e}")
-                import traceback
-                # Log reconnection
+                consecutive_failures += 1
                 from src.config import log_reconnect
                 log_reconnect(connection_id, str(e)[:50])
 
-            # Reconnect with exponential backoff
+            # Adaptive reconnect: fast for temp issues, slower for persistent
             if self.running:
-                log_reconnect(connection_id, f"Reconnecting in {reconnect_delay}s")
+                if consecutive_failures <= 3:
+                    reconnect_delay = 1  # Quick retry
+                elif consecutive_failures <= 10:
+                    reconnect_delay = 3  # Medium backoff
+                else:
+                    reconnect_delay = 10  # Slow for persistent issues
+
+                log_reconnect(connection_id, f"Retry {consecutive_failures} in {reconnect_delay}s")
                 await asyncio.sleep(reconnect_delay)
-                # Exponential backoff with jitter
-                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
 
     async def start_connection(self):
         """
@@ -317,23 +319,19 @@ class TradeWebSocket:
                                 boundary += candle_interval_ms
                                 continue
 
+                            # Add sequence number for log ordering
+                            completed_candle['_sequence'] = self._candle_sequence
+                            self._candle_sequence += 1
+
                             # Append candle to buffer
                             self.candles_buffer[symbol].append(completed_candle)
 
-                            # Log new candle
+                            # Log new candle (async, non-blocking)
                             from src.config import log_new_candle
                             log_new_candle(symbol, completed_candle)
 
                             # Move to next boundary
                             boundary += candle_interval_ms
-
-                        # Update progress for warmup tracking only
-                        candle_count = len(self.candles_buffer[symbol])
-                        # No logging at all to fully remove logging
-
-                        # Trim buffer ONCE after all candles created
-                        if len(self.candles_buffer[symbol]) > WARMUP_INTERVALS:
-                            self.candles_buffer[symbol] = self.candles_buffer[symbol][-WARMUP_INTERVALS:]
 
                         # Update last finalized boundary
                         current_data['last_finalized_boundary'] = current_boundary
@@ -404,12 +402,12 @@ class TradeWebSocket:
     def get_signal_data(self, symbol: str) -> Tuple[bool, Dict]:
         """
         Get signal data for a symbol - NOW SUPER EFFICIENT with pre-built candles
-        Warmup ensures we have enough candles before generating signals
+        Warmup period waits for minimum candles, then metrics calculated on available data
         """
         if symbol in self.candles_buffer:
             candles = self.candles_buffer[symbol]  # Already built candles!
 
-            # Check if we have enough candles (this IS the warmup check)
+            # Warmup check: wait for minimum candles before starting signal processing
             if len(candles) < WARMUP_INTERVALS:
                 return False, {
                     'signal': False,
@@ -425,33 +423,18 @@ class TradeWebSocket:
                     }
                 }
 
-            # Now check if we have enough for signal calculation (20+ for technical indicators)
-            if len(candles) >= 20:
-                # Use candles directly - no conversion needed
-                from src.signal_processor import generate_signal
-                signal, detailed_info = generate_signal(candles)
+            # After warmup, calculate signals on whatever candles we have
+            # Technical indicators will use available data (min 20 for proper calculation)
+            from src.signal_processor import generate_signal
+            signal, detailed_info = generate_signal(candles)
 
-                signal_data = {
-                    'signal': signal,
-                    'candle_count': len(candles),
-                    'last_candle': candles[-1] if candles else None,
-                    'criteria': detailed_info
-                }
-                return signal, signal_data
-            else:
-                return False, {
-                    'signal': False,
-                    'candle_count': len(candles),
-                    'last_candle': None,
-                    'criteria': {
-                        'validation_error': f'Insufficient data: {len(candles)} candles (need 20+)',
-                        'low_vol': False,
-                        'narrow_rng': False,
-                        'high_natr': False,
-                        'growth_filter': False,
-                        'candle_count': len(candles)
-                    }
-                }
+            signal_data = {
+                'signal': signal,
+                'candle_count': len(candles),
+                'last_candle': candles[-1] if candles else None,
+                'criteria': detailed_info
+            }
+            return signal, signal_data
 
         return False, {'signal': False, 'candle_count': 0, 'last_candle': None}
 
