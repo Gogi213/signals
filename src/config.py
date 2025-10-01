@@ -8,10 +8,10 @@ from datetime import datetime
 from typing import List
 
 # Volume filter settings
-MIN_DAILY_VOLUME = 30000000
+MIN_DAILY_VOLUME = 100000000
 
 # Blacklist configuration - coins to exclude from trading
-BLACKLISTED_COINS = ['BTCUSDT','BTCPERP','ETHUSDT','SOLUSDT','XRPUSDT','LTCUSDT','ADAUSDT','DOGEUSDT','DOTUSDT','TRXUSDT']
+BLACKLISTED_COINS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','LTCUSDT','ADAUSDT','DOGEUSDT','DOTUSDT','TRXUSDT']
 
 # Strategy configuration
 DEFAULT_STRATEGY_NAMES = ['xxx']
@@ -24,9 +24,9 @@ CANDLE_INTERVAL_SECONDS = 10  # Each candle represents 10 seconds
 # NOTE: TRADES_BUFFER_SECONDS removed - now using incremental candle building with rolling 100-candle limit
 
 # WebSocket configuration
-WS_URL = 'wss://stream.bybit.com/v5/public/linear'
+WS_URL = 'wss://fstream.binance.com/ws'
 MAX_CONNECTIONS = 20
-MAX_COINS_PER_CONNECTION = 3
+MAX_COINS_PER_CONNECTION = 10  # Binance allows 200 streams per connection
 
 # HTTP request timeouts
 HTTP_TIMEOUT = 30
@@ -130,11 +130,30 @@ def setup_logging():
     logger.addHandler(console_handler)
 
 
+def _format_number(value) -> str:
+    """Format number avoiding scientific notation"""
+    if value == 'N/A' or value is None:
+        return 'N/A'
+    try:
+        num = float(value)
+        # Use appropriate precision based on magnitude
+        if abs(num) < 0.001:
+            return f"{num:.8f}".rstrip('0').rstrip('.')
+        elif abs(num) < 1:
+            return f"{num:.6f}".rstrip('0').rstrip('.')
+        elif abs(num) < 1000:
+            return f"{num:.4f}".rstrip('0').rstrip('.')
+        else:
+            return f"{num:.2f}".rstrip('0').rstrip('.')
+    except (ValueError, TypeError):
+        return str(value)
+
+
 def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complete: bool = False):
     """
     Log trading signal with full details for all criteria
     Only logs signals after warmup is complete
-    Logs all signals (passed and failed) for reference collection
+    Logs signals that have real trading activity (skips forward-fill and invalid candles)
     Also writes to logs/signals.json
     """
     import logging
@@ -143,28 +162,23 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
     if not warmup_complete:
         return
 
-    # Skip only specific validation errors after warmup:
-    # - Forward-fill (no trades in last candle)
-    # - Invalid candles (high < low, close out of range)
-    # Allow "Insufficient data" errors to be logged (during 10-20 candle period)
+    # Skip validation errors (forward-fill, invalid candles)
+    # These are not useful for signal analysis - market is inactive
     if signal_data:
-        # Check root level validation_error (from signal_processor.py)
-        if 'validation_error' in signal_data:
-            val_err = signal_data['validation_error']
-            if val_err and not val_err.startswith('Insufficient data'):
-                return
+        validation_error = signal_data.get('validation_error', '')
+        if validation_error:
+            return  # Skip: "No trades in last candle (forward-fill)", "Invalid candle", etc.
 
-        # Check criteria level validation_error (from websocket_handler.py warmup check)
+        # Also check criteria-level validation_error
         if 'criteria' in signal_data:
             criteria = signal_data['criteria']
-            if 'validation_error' in criteria:
-                val_err = criteria['validation_error']
-                if val_err and not val_err.startswith('Insufficient data'):
-                    return
+            criteria_error = criteria.get('validation_error', '')
+            if criteria_error:
+                return  # Skip: "Warmup", "Insufficient data", etc.
 
     logger = logging.getLogger(__name__)
 
-    # File logging to signals.json
+    # File logging to signals.json (only for valid, active signals)
     file_handler = JSONFileHandler(os.path.join(LOGS_DIR, 'signals.json'))
     log_record = type('obj', (object,), {
         'levelname': 'INFO',
@@ -187,10 +201,13 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
             passed_criteria = []
             
             for crit_name, details in criteria_details.items():
+                current_val = _format_number(details.get('current', 'N/A'))
+                threshold_val = _format_number(details.get('threshold', 'N/A'))
+
                 if details.get('passed', False):
-                    passed_criteria.append(f"{crit_name}({details.get('current', 'N/A')})")
+                    passed_criteria.append(f"{crit_name}({current_val})")
                 else:
-                    failed_criteria.append(f"{crit_name}({details.get('current', 'N/A')} vs {details.get('threshold', 'N/A')})")
+                    failed_criteria.append(f"{crit_name}({current_val} vs {threshold_val})")
             
             # Format the log message
             status = "✅ SIGNAL" if signal else "❌ NO SIGNAL"

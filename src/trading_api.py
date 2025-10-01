@@ -58,6 +58,7 @@ def get_recent_trades(symbol: str, limit: int = 100) -> Optional[List[Dict]]:
 def get_futures_symbols() -> List[str]:
     """
     Get list of all futures symbols from Binance with timeouts
+    Filters only USDT pairs
     """
     url = f"{BINANCE_FUTURES_BASE}/fapi/v1/exchangeInfo"
 
@@ -66,7 +67,10 @@ def get_futures_symbols() -> List[str]:
         response.raise_for_status()
 
         data = response.json()
-        symbols = [item['symbol'] for item in data['symbols'] if item['status'] == 'TRADING']
+        symbols = [
+            item['symbol'] for item in data['symbols']
+            if item['status'] == 'TRADING' and item['symbol'].endswith('USDT')
+        ]
         return symbols
 
     except requests.exceptions.Timeout:

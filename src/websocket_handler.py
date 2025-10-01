@@ -16,10 +16,11 @@ from src.config import WARMUP_INTERVALS, log_websocket_event, log_reconnect
 
 
 class TradeWebSocket:
-    def __init__(self, coins: List[str], ws_url: str = "wss://stream.bybit.com/v5/public/linear", max_connections: int = 12, max_coins_per_connection: int = 20):
+    def __init__(self, coins: List[str], ws_url: str = "wss://fstream.binance.com/ws", max_connections: int = 12, max_coins_per_connection: int = 200):
         """
-        Initialize WebSocket connections for trade data
+        Initialize WebSocket connections for trade data (Binance Futures)
         Uses multiple connections to distribute symbols and avoid limits
+        Binance allows up to 200 streams per connection
         """
         self.coins = coins
         self.ws_url = ws_url
@@ -91,30 +92,28 @@ class TradeWebSocket:
         Args:
             coins_for_connection: List of coin symbols for this connection
         """
-        topics = [f"publicTrade.{coin}" for coin in coins_for_connection]
+        # Binance uses combined streams: wss://fstream.binance.com/stream?streams=btcusdt@trade/ethusdt@trade
+        streams = [f"{coin.lower()}@trade" for coin in coins_for_connection]
+        # Fix: Config has /ws, need /stream for combined streams
+        base = self.ws_url.replace('/ws', '/stream') if '/ws' in self.ws_url else self.ws_url
+        stream_url = f"{base}?streams={'/'.join(streams)}"
         connection_id = f"{coins_for_connection[0]}-{coins_for_connection[-1] if len(coins_for_connection) > 1 else 'single'}"
 
-        reconnect_delay = 1  # Fast initial reconnect (was 5)
-        max_reconnect_delay = 10  # Shorter max delay (was 60)
+        reconnect_delay = 1
+        max_reconnect_delay = 10
         consecutive_failures = 0
 
         while self.running:
             try:
-                # Shorter timeout + ping/pong for faster dead connection detection
                 async with websockets.connect(
-                    self.ws_url,
-                    timeout=10,  # Faster detection (was 30)
-                    ping_interval=20,  # Auto ping every 20s
-                    ping_timeout=10,  # Detect dead in 10s
+                    stream_url,
+                    timeout=10,
+                    ping_interval=20,
+                    ping_timeout=10,
                     close_timeout=5
                 ) as websocket:
 
-                    # Subscribe to trade streams
-                    subscribe_msg = {
-                        "op": "subscribe",
-                        "args": topics
-                    }
-                    await websocket.send(json.dumps(subscribe_msg))
+                    # Binance combined streams don't need subscription message - already in URL
                     # logger.info(f"📡 WebSocket {connection_id}: Subscribed to {len(coins_for_connection)} symbols: {coins_for_connection[:3]}...")
 
                     # Reset on successful connection
@@ -123,48 +122,39 @@ class TradeWebSocket:
 
                     while self.running:
                         try:
-                            # Add timeout to message receive
                             message = await asyncio.wait_for(websocket.recv(), timeout=60)
                             data = json.loads(message)
 
-                            if 'topic' in data and 'data' in data:
-                                topic = data['topic']
-                                trades = data['data']
+                            # Binance combined stream format: {"stream":"btcusdt@trade","data":{...}}
+                            if 'stream' in data and 'data' in data:
+                                stream = data['stream']
+                                trade = data['data']
 
-                                # Extract symbol from topic
-                                if topic.startswith("publicTrade."):
-                                    symbol = topic.split(".")[1]
+                                # Extract symbol from stream name (e.g., "btcusdt@trade" -> "BTCUSDT")
+                                if '@trade' in stream:
+                                    symbol = stream.split('@')[0].upper()
 
-                                    # Process incoming trades
-                                    for trade in trades:
-                                        try:
-                                            # Bybit timestamps are in microseconds, convert to milliseconds
-                                            bybit_timestamp = int(trade['T'])
-                                            # Convert from microseconds to milliseconds if needed
-                                            if bybit_timestamp > 10**15:  # If looks like microseconds (16+ digits)
-                                                timestamp_ms = bybit_timestamp // 1000
-                                            else:
-                                                timestamp_ms = bybit_timestamp
+                                    try:
+                                        # Binance trade format: T=timestamp(ms), p=price, q=quantity, m=isBuyerMaker
+                                        timestamp_ms = int(trade['T'])
+                                        price = float(trade['p'])
+                                        size = float(trade['q'])
 
-                                            # Convert string values to appropriate types
-                                            price = float(trade['p'])
-                                            size = float(trade['v'])  # Convert string volume to float
-                                            
-                                            trade_data = {
-                                                'timestamp': timestamp_ms,
-                                                'price': price,
-                                                'size': size,
-                                                'side': trade['S']
-                                            }
+                                        # Binance: m=true means buyer is maker (sell order filled), so it's a sell
+                                        side = 'Sell' if trade['m'] else 'Buy'
 
-                                            # Process trade incrementally into candles with lock
-                                            if symbol in self.current_candle_data:
-                                                await self._process_trade_to_candle(symbol, trade_data)
-                                            else:
-                                                pass  # logger.warning(f"⚠️ Symbol {symbol} not in current_candle_data!")
-                                        except (KeyError, ValueError, TypeError) as e:
-                                            # Skip invalid trade data silently
-                                            continue
+                                        trade_data = {
+                                            'timestamp': timestamp_ms,
+                                            'price': price,
+                                            'size': size,
+                                            'side': side
+                                        }
+
+                                        if symbol in self.current_candle_data:
+                                            await self._process_trade_to_candle(symbol, trade_data)
+
+                                    except (KeyError, ValueError, TypeError):
+                                        continue
 
                         except asyncio.TimeoutError:
                             # Auto ping/pong handles detection, just log and continue
@@ -357,7 +347,7 @@ class TradeWebSocket:
         Add trades to current candle - timer handles synchronized finalization
         Trades are accumulated until timer creates the candle
         Uses lock to prevent race with finalization timer
-        Includes deduplication to filter duplicate trades from Bybit API (~9.4%)
+        Includes deduplication to filter duplicate trades (if exchange sends duplicates)
         """
         # Deduplication: Create unique signature for this trade
         signature = f"{trade_data['timestamp']}_{trade_data['price']}_{trade_data['size']}"

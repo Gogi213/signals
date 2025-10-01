@@ -47,18 +47,20 @@ def calculate_atr(candles: List[Dict], period: int = 14) -> List[float]:
 def calculate_natr(candles: List[Dict], period: int = 20) -> List[float]:
     """
     Calculate Normalized Average True Range (NATR)
+    Uses Typical Price (high + low + close) / 3 as denominator (matches backtester)
     """
     atr_values = calculate_atr(candles, period)
     natr_values = []
-    
+
     for i, candle in enumerate(candles):
-        close_price = candle['close']
-        if close_price and close_price != 0:
-            natr = (atr_values[i] / close_price) * 100
+        # Typical Price = (high + low + close) / 3
+        typical_price = (candle['high'] + candle['low'] + candle['close']) / 3.0
+        if typical_price and typical_price != 0:
+            natr = (atr_values[i] / typical_price) * 100
         else:
             natr = 0.0
         natr_values.append(natr)
-    
+
     return natr_values
 
 
@@ -156,6 +158,7 @@ def check_growth_filter(candles: List[Dict],
                        min_growth_pct: float = -0.1) -> Tuple[bool, Dict]:
     """
     Check growth filter condition
+    Matches backtester formula: (close - price_n_bars_ago) / price_n_bars_ago * 100
     Returns (passed, details)
     """
     if len(candles) < lookback_period + 1:
@@ -165,7 +168,8 @@ def check_growth_filter(candles: List[Dict],
     lookback_close = candles[-lookback_period - 1]['close']
 
     if lookback_close and lookback_close != 0:
-        growth_pct = ((current_close - lookback_close) / abs(lookback_close)) * 100
+        # Matches backtester: no abs() in denominator
+        growth_pct = ((current_close - lookback_close) / lookback_close) * 100
         passed = growth_pct >= min_growth_pct
         return passed, {
             'current': round(growth_pct, 2),
