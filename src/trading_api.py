@@ -1,5 +1,5 @@
 """
-Module for interacting with trading APIs (Bybit)
+Module for interacting with trading APIs (Binance Futures)
 Includes HTTP timeouts and comprehensive error handling
 """
 import requests
@@ -14,146 +14,108 @@ from .config import MIN_DAILY_VOLUME, HTTP_TIMEOUT, CONNECT_TIMEOUT, BLACKLISTED
 session = requests.Session()
 session.timeout = (CONNECT_TIMEOUT, HTTP_TIMEOUT)  # (connect_timeout, read_timeout)
 
+# Binance Futures API base URL
+BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+
 def get_recent_trades(symbol: str, limit: int = 100) -> Optional[List[Dict]]:
     """
-    Get recent trades for a symbol from Bybit API with timeouts
+    Get recent trades for a symbol from Binance Futures API with timeouts
     """
-    url = "https://api.bybit.com/v5/market/recent-trade"
+    url = f"{BINANCE_FUTURES_BASE}/fapi/v1/trades"
     params = {
-        'category': 'linear',
         'symbol': symbol,
         'limit': limit
     }
 
     try:
         response = session.get(url, params=params, timeout=(CONNECT_TIMEOUT, HTTP_TIMEOUT))
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status()
 
         data = response.json()
-        if data['retCode'] == 0:
-            trades = []
-            for trade in data['result']['list']:
-                trades.append({
-                    'timestamp': int(trade['time']),
-                    'price': float(trade['price']),
-                    'size': float(trade['size']),
-                    'side': trade['side']
-                })
-            return trades
-        else:
-            # logger.error(f"API Error for {symbol}: {data['retMsg']}")
-            return None
+        # Binance returns array directly (no wrapper)
+        trades = []
+        for trade in data:
+            trades.append({
+                'timestamp': int(trade['time']),
+                'price': float(trade['price']),
+                'size': float(trade['qty']),
+                'side': 'Sell' if trade['isBuyerMaker'] else 'Buy'  # Invert: buyerMaker means sell order filled
+            })
+        return trades
 
     except requests.exceptions.Timeout:
-        # logger.error(f"Timeout error for {symbol} (timeout: {HTTP_TIMEOUT}s)")
         return None
-    except requests.exceptions.ConnectionError as e:
-        # logger.error(f"Connection error for {symbol}: {e}")
+    except requests.exceptions.ConnectionError:
         return None
-    except requests.exceptions.HTTPError as e:
-        # logger.error(f"HTTP error for {symbol}: {e}")
+    except requests.exceptions.HTTPError:
         return None
-    except ValueError as e:
-        # logger.error(f"JSON decode error for {symbol}: {e}")
+    except (ValueError, KeyError):
         return None
-    except Exception as e:
-        # logger.error(f"Unexpected error for {symbol}: {type(e).__name__}: {e}")
+    except Exception:
         return None
 
 
 def get_futures_symbols() -> List[str]:
     """
-    Get list of all futures symbols from Bybit with timeouts
+    Get list of all futures symbols from Binance with timeouts
     """
-    url = "https://api.bybit.com/v5/market/tickers"
-    params = {
-        'category': 'linear'
-    }
+    url = f"{BINANCE_FUTURES_BASE}/fapi/v1/exchangeInfo"
 
     try:
-        response = session.get(url, params=params, timeout=(CONNECT_TIMEOUT, HTTP_TIMEOUT))
+        response = session.get(url, timeout=(CONNECT_TIMEOUT, HTTP_TIMEOUT))
         response.raise_for_status()
 
         data = response.json()
-        if data['retCode'] == 0:
-            symbols = [item['symbol'] for item in data['result']['list']]
-            # logger.info(f"Retrieved {len(symbols)} symbols from Bybit")
-            return symbols
-        else:
-            # logger.error(f"API Error getting symbols: {data['retMsg']}")
-            return []
+        symbols = [item['symbol'] for item in data['symbols'] if item['status'] == 'TRADING']
+        return symbols
 
     except requests.exceptions.Timeout:
-        # logger.error(f"Timeout error getting symbols (timeout: {HTTP_TIMEOUT}s)")
         return []
-    except requests.exceptions.ConnectionError as e:
-        # logger.error(f"Connection error getting symbols: {e}")
+    except requests.exceptions.ConnectionError:
         return []
-    except requests.exceptions.HTTPError as e:
-        # logger.error(f"HTTP error getting symbols: {e}")
+    except requests.exceptions.HTTPError:
         return []
-    except ValueError as e:
-        # logger.error(f"JSON decode error getting symbols: {e}")
+    except (ValueError, KeyError):
         return []
-    except Exception as e:
-        # logger.error(f"Unexpected error getting symbols: {type(e).__name__}: {e}")
+    except Exception:
         return []
 
 
 def get_all_symbols_by_volume(min_volume: float = MIN_DAILY_VOLUME) -> List[str]:
     """
-    Get all symbols from Bybit and filter them by volume
+    Get all symbols from Binance and filter them by volume
     """
-    # Get all available symbols
     all_symbols = get_futures_symbols()
     if not all_symbols:
-        # logger.warning("No symbols retrieved, returning empty list")
         return []
 
-    # Create a map of symbol to volume for filtering
-    url = "https://api.bybit.com/v5/market/tickers"
-    params = {
-        'category': 'linear'
-    }
+    url = f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/24hr"
 
     try:
-        response = session.get(url, params=params, timeout=(CONNECT_TIMEOUT, HTTP_TIMEOUT))
+        response = session.get(url, timeout=(CONNECT_TIMEOUT, HTTP_TIMEOUT))
         response.raise_for_status()
 
         data = response.json()
-        if data['retCode'] == 0:
-            volume_map = {}
-            for item in data['result']['list']:
-                try:
-                    # Volume is typically in the 'turnover24h' field (24h turnover/volume)
-                    volume_24h = float(item.get('turnover24h', 0))
-                    volume_map[item['symbol']] = volume_24h
-                except (ValueError, TypeError):
-                    volume_map[item['symbol']] = 0
+        volume_map = {}
+        for item in data:
+            try:
+                volume_24h = float(item.get('quoteVolume', 0))
+                volume_map[item['symbol']] = volume_24h
+            except (ValueError, TypeError, KeyError):
+                volume_map[item['symbol']] = 0
 
-            # Filter symbols that have volume >= min_volume and not in blacklist
-            filtered_by_volume = [symbol for symbol in all_symbols if volume_map.get(symbol, 0) >= min_volume]
-            filtered_symbols = [symbol for symbol in filtered_by_volume if symbol not in BLACKLISTED_COINS]
+        filtered_by_volume = [s for s in all_symbols if volume_map.get(s, 0) >= min_volume]
+        filtered_symbols = [s for s in filtered_by_volume if s not in BLACKLISTED_COINS]
 
-            blacklisted_count = len(filtered_by_volume) - len(filtered_symbols)
-            # logger.info(f"Filtered {len(filtered_symbols)} of {len(all_symbols)} symbols by volume (min: {min_volume}), excluded {blacklisted_count} blacklisted coins")
-            return filtered_symbols
-        else:
-            # logger.error(f"API Error getting ticker data for volume filter: {data['retMsg']}")
-            return []  # Return empty list if filtering fails
+        return filtered_symbols
 
     except requests.exceptions.Timeout:
-        # logger.error(f"Timeout error getting ticker data for volume filter (timeout: {HTTP_TIMEOUT}s)")
         return []
-    except requests.exceptions.ConnectionError as e:
-        # logger.error(f"Connection error getting ticker data for volume filter: {e}")
+    except requests.exceptions.ConnectionError:
         return []
-    except requests.exceptions.HTTPError as e:
-        # logger.error(f"HTTP error getting ticker data for volume filter: {e}")
+    except requests.exceptions.HTTPError:
         return []
-    except ValueError as e:
-        # logger.error(f"JSON decode error getting ticker data for volume filter: {e}")
+    except (ValueError, KeyError):
         return []
-    except Exception as e:
-        # logger.error(f"Unexpected error getting ticker data for volume filter: {type(e).__name__}: {e}")
+    except Exception:
         return []
