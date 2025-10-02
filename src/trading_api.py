@@ -3,12 +3,8 @@ Module for interacting with trading APIs (Binance Futures)
 Includes HTTP timeouts and comprehensive error handling
 """
 import requests
-# import logging
 from typing import List, Dict, Optional
 from .config import MIN_DAILY_VOLUME, HTTP_TIMEOUT, CONNECT_TIMEOUT, BLACKLISTED_COINS
-
-# Configure logging
-# logger = logging.getLogger(__name__)
 
 # Configure requests session with proper timeouts
 session = requests.Session()

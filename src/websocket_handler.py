@@ -5,14 +5,10 @@ Manages multiple connections, candle aggregation, and synchronized finalization
 import asyncio
 import websockets
 import json
-# import logging
 import time
 from typing import List, Dict, Callable, Optional, Tuple
 from src.candle_aggregator import create_candle_from_trades
-from src.config import WARMUP_INTERVALS, log_websocket_event, log_reconnect
-
-# Configure logging
-# logger = logging.getLogger(__name__)
+from src.config import WARMUP_INTERVALS
 
 
 class TradeWebSocket:
@@ -35,7 +31,6 @@ class TradeWebSocket:
         self._candle_locks = {}         # Locks to prevent race conditions during finalization
         self._trades_by_interval = {}   # Store trades by 10-second intervals for each coin
         self._seen_trade_signatures = {}  # Track seen trades for deduplication (timestamp_price_size)
-        self._candle_sequence = 0       # Global sequence for log ordering
 
         # Connection stability improvements
         self._connection_stats = {}     # Track connection statistics
@@ -96,7 +91,6 @@ class TradeWebSocket:
         Args:
             coins_for_connection: List of coin symbols for this connection
         """
-        from src.config import log_reconnect
         # Binance uses combined streams: wss://fstream.binance.com/stream?streams=btcusdt@trade/ethusdt@trade
         streams = [f"{coin.lower()}@trade" for coin in coins_for_connection]
         # Fix: Config has /ws, need /stream for combined streams
@@ -137,8 +131,7 @@ class TradeWebSocket:
                     self._connection_stats[connection_id]['connect_time'] = connect_start
                     self._reconnect_count[connection_id] = 0  # Reset on successful connection
 
-                    # Log connection
-                    log_websocket_event(f"Connection {connection_id}: Connected", 'INFO')
+                    # Connection established
 
                     # Reset on successful connection
                     reconnect_delay = 1
@@ -195,16 +188,13 @@ class TradeWebSocket:
                                 break
                                 
                         except websockets.exceptions.ConnectionClosed as e:
-                            log_websocket_event(f"Connection {connection_id}: Connection closed ({e.code})", 'WARNING')
                             self._connection_stats[connection_id]['disconnect_time'] = time.time()
                             if self.on_disconnect:
                                 self.on_disconnect()
                             break
                         except json.JSONDecodeError as e:
-                            # logger.error(f"Connection {connection_id}: JSON decode error: {e}")
                             await asyncio.sleep(1)
                         except Exception as e:
-                            pass  # logger.error(f"Connection {connection_id}: Message processing error: {e}")
                             await asyncio.sleep(1)
 
             except websockets.exceptions.ConnectionClosed as e:
@@ -216,19 +206,15 @@ class TradeWebSocket:
             except websockets.exceptions.InvalidHandshake as e:
                 consecutive_failures += 1
                 self._reconnect_count[connection_id] += 1
-                log_websocket_event(f"Connection {connection_id}: Invalid handshake: {str(e)[:50]}", 'ERROR')
             except asyncio.TimeoutError:
                 consecutive_failures += 1
                 self._reconnect_count[connection_id] += 1
-                log_websocket_event(f"Connection {connection_id}: Connection timeout", 'ERROR')
             except OSError as e:
                 consecutive_failures += 1
                 self._reconnect_count[connection_id] += 1
-                log_websocket_event(f"Connection {connection_id}: OS error: {str(e)[:50]}", 'ERROR')
             except Exception as e:
                 consecutive_failures += 1
                 self._reconnect_count[connection_id] += 1
-                log_reconnect(connection_id, str(e)[:50])
 
             # Adaptive reconnect: conservative for always-on system
             if self.running:
@@ -242,9 +228,8 @@ class TradeWebSocket:
                 else:
                     reconnect_delay = 60  # Long delay for persistent issues
 
-                # Log reconnection attempt with stats
+                # Reconnection attempt with stats
                 total_reconnects = self._reconnect_count[connection_id]
-                log_reconnect(connection_id, f"Attempt {total_reconnects} (failures: {consecutive_failures}) in {reconnect_delay:.1f}s")
                 await asyncio.sleep(reconnect_delay)
 
     async def start_connection(self):
@@ -258,9 +243,7 @@ class TradeWebSocket:
         # Distribute symbols across multiple connections
         connections = self._distribute_symbols_to_connections()
 
-        # Log connection information
-        from src.config import log_connection_info
-        log_connection_info(len(self.coins))
+        # Connection information
 
         # Start connection event handler if set
         if self.on_connect:
@@ -279,7 +262,7 @@ class TradeWebSocket:
         try:
             await asyncio.gather(*self._connection_tasks, return_exceptions=True)
         except Exception as e:
-            pass  # logger.error(f"Error in connection gathering: {e}")
+            pass
 
     async def _candle_finalization_timer(self):
         """
@@ -295,7 +278,6 @@ class TradeWebSocket:
         wait_ms = next_boundary - current_time_ms
         await asyncio.sleep(wait_ms / 1000.0)
 
-        pass  # logger.info("🕰️ Candle finalization timer started (with gap-filling)")
 
         while self.running:
             try:
@@ -358,16 +340,8 @@ class TradeWebSocket:
                                 boundary += candle_interval_ms
                                 continue
 
-                            # Add sequence number for log ordering
-                            completed_candle['_sequence'] = self._candle_sequence
-                            self._candle_sequence += 1
-
                             # Append candle to buffer
                             self.candles_buffer[symbol].append(completed_candle)
-
-                            # Log new candle (async, non-blocking)
-                            from src.config import log_new_candle
-                            log_new_candle(symbol, completed_candle)
 
                             # Move to next boundary
                             boundary += candle_interval_ms
@@ -386,9 +360,6 @@ class TradeWebSocket:
                 await asyncio.sleep(10.0)
 
             except Exception as e:
-                pass  # logger.error(f"Error in candle finalization timer: {e}")
-                import traceback
-                # logger.error(traceback.format_exc())
                 await asyncio.sleep(10.0)  # Continue with normal interval
 
     async def _process_trade_to_candle(self, symbol: str, trade_data: Dict):

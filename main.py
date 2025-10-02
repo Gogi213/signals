@@ -1,21 +1,15 @@
 
 import asyncio
 import time
-# import logging
 from typing import List, Dict
 
 from src.websocket_handler import TradeWebSocket
 from src.strategy_client import StrategyRunner
 from src.config import (
     DEFAULT_STRATEGY_NAMES, DEFAULT_SERVER_URLS, DEFAULT_UPDATE_INTERVAL,
-    MIN_DAILY_VOLUME, build_strategy_url, setup_logging, log_signal, log_connection_info,
-    log_warmup_progress, WARMUP_INTERVALS, start_candle_logging
+    MIN_DAILY_VOLUME, build_strategy_url, WARMUP_INTERVALS
 )
 from src.trading_api import get_all_symbols_by_volume
-
-# Setup JSON logging
-setup_logging()
-# logger = logging.getLogger(__name__)
 
 
 async def send_signal(url: str, strategy_name: str, coin: str, signal: bool):
@@ -52,9 +46,6 @@ async def main():
     """
     Main function to run the trading signals system
     """
-    # Start async candle logging worker
-    start_candle_logging()
-
     # Get all symbols and filter by volume before creating WebSocket aggregator
     filtered_coins = get_all_symbols_by_volume()
 
@@ -66,16 +57,13 @@ async def main():
     coin_first_seen = {}  # Track when each coin was first processed
     coin_last_signal = {}  # Track last signal state to avoid spam
     coin_last_candle_count = {}  # Track last candle count to detect new candles
-    coin_last_signal_time = {}  # Track last signal time for 10-second logging control
-
-    # Log connection info
-    log_connection_info(len(filtered_coins))
+    coin_last_signal_time = {}  # Track last signal time for 10-second control
 
     # Start WebSocket connection in a separate task
     ws_task = asyncio.create_task(aggregator.start_connection())
     
     # Keep the connection running and process signals in real-time
-    last_warmup_log = 0
+    last_warmup_track = 0
     warmup_complete = False
     try:
         while True:
@@ -126,17 +114,14 @@ async def main():
                 current_candle_count = signal_info.get('candle_count', 0)
                 prev_candle_count = coin_last_candle_count.get(coin, 0)
 
-                # Log signal when new candle appeared (candle_count increased)
-                # Log ALL signals including failed ones (no validation_error check)
+                # Process signal when new candle appeared (candle_count increased)
                 if (current_candle_count > prev_candle_count and signal_info):
                     # Check if we're still in warmup
                     criteria = signal_info.get('criteria', {})
                     validation_error = criteria.get('validation_error', '')
 
-                    # Log only after warmup is complete
+                    # Process only after warmup is complete
                     if not validation_error.startswith('Warmup:'):
-                        from src.config import log_signal
-                        log_signal(coin, signal, signal_info, warmup_complete)
                         coin_last_candle_count[coin] = current_candle_count
 
                 # Send signal only if it changed (to avoid spamming strategy servers)
@@ -146,19 +131,18 @@ async def main():
 
                 coin_last_signal[coin] = signal
 
-            # Log warmup progress every 5 intervals (or on first candle)
+            # Track warmup progress every 5 intervals (or on first candle)
             if warmup_active and min_candles != float('inf'):
-                if min_candles - last_warmup_log >= 5 or (min_candles == 1 and last_warmup_log == 0):
-                    log_warmup_progress(min_candles, WARMUP_INTERVALS)
-                    last_warmup_log = min_candles
+                if min_candles - last_warmup_track >= 5 or (min_candles == 1 and last_warmup_track == 0):
+                    last_warmup_track = min_candles
 
             # Check for signals every 0.3 seconds for real-time processing
             await asyncio.sleep(0.3)
     
     except KeyboardInterrupt:
-        pass  # logger.info("Shutting down...")
+        pass
     except Exception as e:
-        pass  # logger.error(f"Error: {e}")
+        pass
     finally:
         # Stop the WebSocket connection after processing
         await aggregator.stop()
