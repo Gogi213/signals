@@ -153,7 +153,7 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
     """
     Log trading signal with full details for all criteria
     Only logs signals after warmup is complete
-    Logs signals that have real trading activity (skips forward-fill and invalid candles)
+    Logs ONLY real signals (excludes warmup and forward-fill)
     Also writes to logs/signals.json
     """
     import logging
@@ -162,23 +162,16 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
     if not warmup_complete:
         return
 
-    # Skip validation errors (forward-fill, invalid candles)
-    # These are not useful for signal analysis - market is inactive
-    if signal_data:
-        validation_error = signal_data.get('validation_error', '')
-        if validation_error:
-            return  # Skip: "No trades in last candle (forward-fill)", "Invalid candle", etc.
-
-        # Also check criteria-level validation_error
-        if 'criteria' in signal_data:
-            criteria = signal_data['criteria']
-            criteria_error = criteria.get('validation_error', '')
-            if criteria_error:
-                return  # Skip: "Warmup", "Insufficient data", etc.
+    # DO NOT skip failed signals - we want to log ALL signals after warmup!
+    # Failed signals are important for analysis and debugging
 
     logger = logging.getLogger(__name__)
 
     # File logging to signals.json (only for valid, active signals)
+    # Ensure logs directory exists
+    if not os.path.exists(LOGS_DIR):
+        os.makedirs(LOGS_DIR)
+    
     file_handler = JSONFileHandler(os.path.join(LOGS_DIR, 'signals.json'))
     log_record = type('obj', (object,), {
         'levelname': 'INFO',
@@ -220,7 +213,8 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
             # Simple criteria logging
             low_vol = criteria.get('low_vol', False)
             narrow_rng = criteria.get('narrow_rng', False)
-            high_natr = criteria.get('high_natr', False)
+            high_mma = criteria.get('high_mma', False)
+            high_natr = criteria.get('high_natr', False)  # Keep for backward compatibility
             growth_filter = criteria.get('growth_filter', False)
             
             failed_criteria = []
@@ -230,7 +224,9 @@ def log_signal(coin: str, signal: bool, signal_data: dict = None, warmup_complet
             else: failed_criteria.append("low_vol")
             if narrow_rng: passed_criteria.append("narrow_rng");
             else: failed_criteria.append("narrow_rng")
-            if high_natr: passed_criteria.append("high_natr");
+            if high_mma: passed_criteria.append("high_mma");
+            else: failed_criteria.append("high_mma")
+            if high_natr: passed_criteria.append("high_natr");  # Keep for backward compatibility
             else: failed_criteria.append("high_natr")
             if growth_filter: passed_criteria.append("growth_filter");
             else: failed_criteria.append("growth_filter")
@@ -332,18 +328,32 @@ async def _candle_log_worker():
 
             # Write batch to file
             for coin, candle_data in batch:
-                # Console log
-                timestamp = datetime.fromtimestamp(candle_data['timestamp']/1000).strftime('%H:%M:%S')
-                logger.info(f"🕯️  {coin} | {timestamp} | O:{candle_data['open']:.4f} H:{candle_data['high']:.4f} L:{candle_data['low']:.4f} C:{candle_data['close']:.4f} V:{candle_data['volume']:.2f}")
+                # Console log with correct timestamp from candle
+                candle_timestamp = datetime.fromtimestamp(candle_data['timestamp']/1000)
+
+                # Create log record with candle's timestamp (not current time)
+                log_record = logging.LogRecord(
+                    name=logger.name,
+                    level=logging.INFO,
+                    pathname=__file__,
+                    lineno=344,
+                    msg=f"🕯️  {coin} | {candle_timestamp.strftime('%H:%M:%S')} | O:{candle_data['open']:.4f} H:{candle_data['high']:.4f} L:{candle_data['low']:.4f} C:{candle_data['close']:.4f} V:{candle_data['volume']:.2f}",
+                    args=(),
+                    exc_info=None
+                )
+                # Set the record's timestamp to match the candle
+                log_record.created = candle_data['timestamp'] / 1000
+                log_record.msecs = (candle_data['timestamp'] % 1000)
+                logger.handle(log_record)
 
                 # File log
-                log_record = type('obj', (object,), {
+                file_log_record = type('obj', (object,), {
                     'levelname': 'INFO',
                     'getMessage': lambda self: f"Candle for {coin}",
                     'coin': coin,
                     'candle_data': candle_data
                 })()
-                file_handler.emit(log_record)
+                file_handler.emit(file_log_record)
 
             # Sleep briefly to avoid busy-wait
             await asyncio.sleep(0.5)

@@ -64,6 +64,109 @@ def calculate_natr(candles: List[Dict], period: int = 20) -> List[float]:
     return natr_values
 
 
+def calculate_mma_wilder(prices: List[float], period: int) -> List[float]:
+    """
+    Calculate Moving Average using Wilder's method (MMA)
+    Wilder's method uses exponential smoothing with alpha = 1/period
+    """
+    if not prices:
+        return []
+    
+    mma_values = []
+    
+    # Initialize with first price
+    if prices:
+        mma_values.append(prices[0])
+    
+    # Calculate subsequent values using Wilder's smoothing
+    alpha = 1.0 / period
+    for i in range(1, len(prices)):
+        mma_value = alpha * prices[i] + (1 - alpha) * mma_values[i-1]
+        mma_values.append(mma_value)
+    
+    return mma_values
+
+
+def calculate_mma_wilder_from_candles(candles: List[Dict], period: int, price_type: str = 'close') -> List[float]:
+    """
+    Calculate Moving Average using Wilder's method from candle data
+    price_type: 'close', 'high', 'low', 'open', 'typical' (h+l+c)/3
+    """
+    if not candles:
+        return []
+    
+    # Extract prices based on type
+    if price_type == 'close':
+        prices = [candle['close'] for candle in candles]
+    elif price_type == 'high':
+        prices = [candle['high'] for candle in candles]
+    elif price_type == 'low':
+        prices = [candle['low'] for candle in candles]
+    elif price_type == 'open':
+        prices = [candle['open'] for candle in candles]
+    elif price_type == 'typical':
+        prices = [(candle['high'] + candle['low'] + candle['close']) / 3.0 for candle in candles]
+    else:
+        # Default to close
+        prices = [candle['close'] for candle in candles]
+    
+    return calculate_mma_wilder(prices, period)
+
+
+def calculate_mma_wilder_true_range(candles: List[Dict], period: int = 20) -> List[float]:
+    """
+    Calculate Moving Average using Wilder's method for True Range
+    This replaces NATR (Normalized Average True Range)
+    """
+    if len(candles) < 2:
+        return [0.0] * len(candles)
+    
+    # Calculate True Range values
+    true_ranges = []
+    for i in range(1, len(candles)):
+        high = candles[i]['high']
+        low = candles[i]['low']
+        prev_close = candles[i-1]['close']
+        
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
+        true_ranges.append(tr)
+    
+    # Pad with zero for the first value
+    true_ranges = [0.0] + true_ranges
+    
+    # Calculate MMA using Wilder's method
+    return calculate_mma_wilder(true_ranges, period)
+
+
+def calculate_mma_wilder_normalized(candles: List[Dict], period: int = 20) -> List[float]:
+    """
+    Calculate Moving Average using Wilder's method for Normalized True Range
+    This replaces NATR (Normalized Average True Range)
+    """
+    if len(candles) < 2:
+        return [0.0] * len(candles)
+    
+    # Calculate MMA of True Range
+    mma_tr = calculate_mma_wilder_true_range(candles, period)
+    
+    # Normalize by Typical Price
+    mma_normalized = []
+    for i, candle in enumerate(candles):
+        # Typical Price = (high + low + close) / 3
+        typical_price = (candle['high'] + candle['low'] + candle['close']) / 3.0
+        if typical_price and typical_price != 0:
+            normalized = (mma_tr[i] / typical_price) * 100
+        else:
+            normalized = 0.0
+        mma_normalized.append(normalized)
+    
+    return mma_normalized
+
+
 def calculate_percentile(data: List[float], period: int, percentile: float) -> List[float]:
     """
     Calculate rolling percentile for the given data
@@ -135,6 +238,7 @@ def check_high_natr_condition(candles: List[Dict],
                             natr_min: float = 0.6) -> Tuple[bool, Dict]:
     """
     Check if NATR is high (highNatr condition)
+    DEPRECATED: Use check_high_mma_condition instead
     Returns (passed, details)
     """
     if not candles:
@@ -149,6 +253,29 @@ def check_high_natr_condition(candles: List[Dict],
     return passed, {
         'current': round(current_natr, 3),
         'threshold': natr_min,
+        'passed': passed
+    }
+
+
+def check_high_mma_condition(candles: List[Dict],
+                           mma_period: int = 20,
+                           mma_min: float = 0.6) -> Tuple[bool, Dict]:
+    """
+    Check if MMA (Wilder) Normalized True Range is high (replaces highNatr condition)
+    Returns (passed, details)
+    """
+    if not candles:
+        return False, {'current': 0, 'threshold': mma_min, 'passed': False}
+
+    mma_values = calculate_mma_wilder_normalized(candles, mma_period)
+
+    # Check the last candle
+    current_mma = mma_values[-1]
+    passed = current_mma > mma_min
+
+    return passed, {
+        'current': round(current_mma, 3),
+        'threshold': mma_min,
         'passed': passed
     }
 
@@ -212,25 +339,26 @@ def generate_signal(candles: List[Dict]) -> Tuple[bool, Dict]:
     # Check all conditions with detailed values
     low_vol_passed, low_vol_details = check_low_volume_condition(candles)
     narrow_rng_passed, narrow_rng_details = check_narrow_range_condition(candles)
-    high_natr_passed, high_natr_details = check_high_natr_condition(candles)
+    high_mma_passed, high_mma_details = check_high_mma_condition(candles)
     growth_filter_passed, growth_filter_details = check_growth_filter(candles)
 
     # Store detailed criteria
     detailed_info['criteria_details'] = {
         'low_vol': low_vol_details,
         'narrow_rng': narrow_rng_details,
-        'high_natr': high_natr_details,
+        'high_mma': high_mma_details,
         'growth_filter': growth_filter_details
     }
 
     # Store simple pass/fail for backward compatibility
     detailed_info['low_vol'] = low_vol_passed
     detailed_info['narrow_rng'] = narrow_rng_passed
-    detailed_info['high_natr'] = high_natr_passed
+    detailed_info['high_mma'] = high_mma_passed
+    detailed_info['high_natr'] = high_mma_passed  # Keep for backward compatibility
     detailed_info['growth_filter'] = growth_filter_passed
 
     # Combine all conditions
-    signal_raw = low_vol_passed and narrow_rng_passed and high_natr_passed
+    signal_raw = low_vol_passed and narrow_rng_passed and high_mma_passed
     final_signal = signal_raw and growth_filter_passed
 
     return final_signal, detailed_info

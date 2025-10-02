@@ -68,6 +68,7 @@ async def main():
     coin_first_seen = {}  # Track when each coin was first processed
     coin_last_signal = {}  # Track last signal state to avoid spam
     coin_last_candle_count = {}  # Track last candle count to detect new candles
+    coin_last_signal_time = {}  # Track last signal time for 10-second logging control
 
     # Log connection info
     log_connection_info(len(filtered_coins))
@@ -127,11 +128,18 @@ async def main():
                 current_candle_count = signal_info.get('candle_count', 0)
                 prev_candle_count = coin_last_candle_count.get(coin, 0)
 
-                # Log signal ONLY when new candle appeared (candle_count increased)
-                if current_candle_count > prev_candle_count:
-                    from src.config import log_signal
-                    log_signal(coin, signal, signal_info, warmup_complete)
-                    coin_last_candle_count[coin] = current_candle_count
+                # Log signal when new candle appeared (candle_count increased)
+                # Log ALL signals including failed ones (no validation_error check)
+                if (current_candle_count > prev_candle_count and signal_info):
+                    # Check if we're still in warmup
+                    criteria = signal_info.get('criteria', {})
+                    validation_error = criteria.get('validation_error', '')
+
+                    # Log only after warmup is complete
+                    if not validation_error.startswith('Warmup:'):
+                        from src.config import log_signal
+                        log_signal(coin, signal, signal_info, warmup_complete)
+                        coin_last_candle_count[coin] = current_candle_count
 
                 # Send signal only if it changed (to avoid spamming strategy servers)
                 if (prev_signal is None or prev_signal != signal) and signal:

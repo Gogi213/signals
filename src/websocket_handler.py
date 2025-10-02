@@ -37,6 +37,10 @@ class TradeWebSocket:
         self._seen_trade_signatures = {}  # Track seen trades for deduplication (timestamp_price_size)
         self._candle_sequence = 0       # Global sequence for log ordering
 
+        # Connection stability improvements
+        self._connection_stats = {}     # Track connection statistics
+        self._reconnect_count = {}      # Track reconnection attempts
+
         # Initialize candle buffers for each coin
         for coin in self.coins:
             self.candles_buffer[coin] = []         # List of completed candles
@@ -92,6 +96,7 @@ class TradeWebSocket:
         Args:
             coins_for_connection: List of coin symbols for this connection
         """
+        from src.config import log_reconnect
         # Binance uses combined streams: wss://fstream.binance.com/stream?streams=btcusdt@trade/ethusdt@trade
         streams = [f"{coin.lower()}@trade" for coin in coins_for_connection]
         # Fix: Config has /ws, need /stream for combined streams
@@ -99,22 +104,41 @@ class TradeWebSocket:
         stream_url = f"{base}?streams={'/'.join(streams)}"
         connection_id = f"{coins_for_connection[0]}-{coins_for_connection[-1] if len(coins_for_connection) > 1 else 'single'}"
 
+        # Initialize connection stats
+        if connection_id not in self._connection_stats:
+            self._connection_stats[connection_id] = {
+                'connect_time': 0,
+                'disconnect_time': 0,
+                'message_count': 0,
+                'last_message_time': 0
+            }
+        
+        if connection_id not in self._reconnect_count:
+            self._reconnect_count[connection_id] = 0
+
         reconnect_delay = 1
-        max_reconnect_delay = 10
+        max_reconnect_delay = 30  # Increased max delay
         consecutive_failures = 0
 
         while self.running:
             try:
+                connect_start = time.time()
                 async with websockets.connect(
                     stream_url,
-                    timeout=10,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=5
+                    ping_interval=None,  # Let Binance server handle ping (every 3 min)
+                    ping_timeout=None,   # No client-side pong timeout
+                    close_timeout=10,
+                    max_size=2**20,      # 1MB max message size
+                    compression=None,    # Disable compression for stability
+                    max_queue=1024       # Increase queue size for high-volume periods
                 ) as websocket:
 
-                    # Binance combined streams don't need subscription message - already in URL
-                    # logger.info(f"📡 WebSocket {connection_id}: Subscribed to {len(coins_for_connection)} symbols: {coins_for_connection[:3]}...")
+                    # Update connection stats
+                    self._connection_stats[connection_id]['connect_time'] = connect_start
+                    self._reconnect_count[connection_id] = 0  # Reset on successful connection
+
+                    # Log connection
+                    log_websocket_event(f"Connection {connection_id}: Connected", 'INFO')
 
                     # Reset on successful connection
                     reconnect_delay = 1
@@ -122,45 +146,52 @@ class TradeWebSocket:
 
                     while self.running:
                         try:
-                            message = await asyncio.wait_for(websocket.recv(), timeout=60)
-                            data = json.loads(message)
+                            # Receive messages with timeout to detect stale connections
+                            try:
+                                message = await asyncio.wait_for(websocket.recv(), timeout=300)
+                                data = json.loads(message)
+                                
+                                # Update message stats
+                                self._connection_stats[connection_id]['message_count'] += 1
+                                self._connection_stats[connection_id]['last_message_time'] = time.time()
 
-                            # Binance combined stream format: {"stream":"btcusdt@trade","data":{...}}
-                            if 'stream' in data and 'data' in data:
-                                stream = data['stream']
-                                trade = data['data']
+                                # Binance combined stream format: {"stream":"btcusdt@trade","data":{...}}
+                                if 'stream' in data and 'data' in data:
+                                    stream = data['stream']
+                                    trade = data['data']
 
-                                # Extract symbol from stream name (e.g., "btcusdt@trade" -> "BTCUSDT")
-                                if '@trade' in stream:
-                                    symbol = stream.split('@')[0].upper()
+                                    # Extract symbol from stream name (e.g., "btcusdt@trade" -> "BTCUSDT")
+                                    if '@trade' in stream:
+                                        symbol = stream.split('@')[0].upper()
 
-                                    try:
-                                        # Binance trade format: T=timestamp(ms), p=price, q=quantity, m=isBuyerMaker
-                                        timestamp_ms = int(trade['T'])
-                                        price = float(trade['p'])
-                                        size = float(trade['q'])
+                                        try:
+                                            # Binance trade format: T=timestamp(ms), p=price, q=quantity, m=isBuyerMaker
+                                            timestamp_ms = int(trade['T'])
+                                            price = float(trade['p'])
+                                            size = float(trade['q'])
 
-                                        # Binance: m=true means buyer is maker (sell order filled), so it's a sell
-                                        side = 'Sell' if trade['m'] else 'Buy'
+                                            # Binance: m=true means buyer is maker (sell order filled), so it's a sell
+                                            side = 'Sell' if trade['m'] else 'Buy'
 
-                                        trade_data = {
-                                            'timestamp': timestamp_ms,
-                                            'price': price,
-                                            'size': size,
-                                            'side': side
-                                        }
+                                            trade_data = {
+                                                'timestamp': timestamp_ms,
+                                                'price': price,
+                                                'size': size,
+                                                'side': side
+                                            }
 
-                                        if symbol in self.current_candle_data:
-                                            await self._process_trade_to_candle(symbol, trade_data)
+                                            if symbol in self.current_candle_data:
+                                                await self._process_trade_to_candle(symbol, trade_data)
 
-                                    except (KeyError, ValueError, TypeError):
-                                        continue
-
-                        except asyncio.TimeoutError:
-                            # Auto ping/pong handles detection, just log and continue
-                            log_websocket_event(f"Connection {connection_id}: No messages for 60s", 'WARNING')
-                        except websockets.exceptions.ConnectionClosed:
-                            log_websocket_event(f"Connection {connection_id}: Connection closed", 'WARNING')
+                                        except (KeyError, ValueError, TypeError):
+                                            continue
+                            except asyncio.CancelledError:
+                                # Task was cancelled during shutdown
+                                break
+                                
+                        except websockets.exceptions.ConnectionClosed as e:
+                            log_websocket_event(f"Connection {connection_id}: Connection closed ({e.code})", 'WARNING')
+                            self._connection_stats[connection_id]['disconnect_time'] = time.time()
                             if self.on_disconnect:
                                 self.on_disconnect()
                             break
@@ -173,29 +204,42 @@ class TradeWebSocket:
 
             except websockets.exceptions.ConnectionClosed as e:
                 consecutive_failures += 1
+                self._reconnect_count[connection_id] += 1
+                self._connection_stats[connection_id]['disconnect_time'] = time.time()
                 if self.on_disconnect:
                     self.on_disconnect()
             except websockets.exceptions.InvalidHandshake as e:
                 consecutive_failures += 1
+                self._reconnect_count[connection_id] += 1
+                log_websocket_event(f"Connection {connection_id}: Invalid handshake: {str(e)[:50]}", 'ERROR')
             except asyncio.TimeoutError:
                 consecutive_failures += 1
+                self._reconnect_count[connection_id] += 1
+                log_websocket_event(f"Connection {connection_id}: Connection timeout", 'ERROR')
             except OSError as e:
                 consecutive_failures += 1
+                self._reconnect_count[connection_id] += 1
+                log_websocket_event(f"Connection {connection_id}: OS error: {str(e)[:50]}", 'ERROR')
             except Exception as e:
                 consecutive_failures += 1
-                from src.config import log_reconnect
+                self._reconnect_count[connection_id] += 1
                 log_reconnect(connection_id, str(e)[:50])
 
-            # Adaptive reconnect: fast for temp issues, slower for persistent
+            # Adaptive reconnect: conservative for always-on system
             if self.running:
-                if consecutive_failures <= 3:
-                    reconnect_delay = 1  # Quick retry
-                elif consecutive_failures <= 10:
-                    reconnect_delay = 3  # Medium backoff
+                # Very conservative reconnect - avoid hammering Binance
+                if consecutive_failures == 1:
+                    reconnect_delay = 5  # Initial delay
+                elif consecutive_failures <= 3:
+                    reconnect_delay = 10  # Short delay
+                elif consecutive_failures <= 5:
+                    reconnect_delay = 30  # Medium delay
                 else:
-                    reconnect_delay = 10  # Slow for persistent issues
+                    reconnect_delay = 60  # Long delay for persistent issues
 
-                log_reconnect(connection_id, f"Retry {consecutive_failures} in {reconnect_delay}s")
+                # Log reconnection attempt with stats
+                total_reconnects = self._reconnect_count[connection_id]
+                log_reconnect(connection_id, f"Attempt {total_reconnects} (failures: {consecutive_failures}) in {reconnect_delay:.1f}s")
                 await asyncio.sleep(reconnect_delay)
 
     async def start_connection(self):
@@ -407,7 +451,8 @@ class TradeWebSocket:
                         'validation_error': f'Warmup: {len(candles)}/{WARMUP_INTERVALS} candles',
                         'low_vol': False,
                         'narrow_rng': False,
-                        'high_natr': False,
+                        'high_mma': False,
+                        'high_natr': False,  # Keep for backward compatibility
                         'growth_filter': False,
                         'candle_count': len(candles)
                     }
