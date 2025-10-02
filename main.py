@@ -1,6 +1,4 @@
-"""
-Main application file for the trading signals system
-"""
+
 import asyncio
 import time
 # import logging

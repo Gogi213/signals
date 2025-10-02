@@ -332,12 +332,14 @@ async def _candle_log_worker():
                 candle_timestamp = datetime.fromtimestamp(candle_data['timestamp']/1000)
 
                 # Create log record with candle's timestamp (not current time)
+                # Use _format_number for volume to show full precision
+                volume_str = _format_number(candle_data['volume'])
                 log_record = logging.LogRecord(
                     name=logger.name,
                     level=logging.INFO,
                     pathname=__file__,
                     lineno=344,
-                    msg=f"🕯️  {coin} | {candle_timestamp.strftime('%H:%M:%S')} | O:{candle_data['open']:.4f} H:{candle_data['high']:.4f} L:{candle_data['low']:.4f} C:{candle_data['close']:.4f} V:{candle_data['volume']:.2f}",
+                    msg=f"🕯️  {coin} | {candle_timestamp.strftime('%H:%M:%S')} | O:{candle_data['open']:.4f} H:{candle_data['high']:.4f} L:{candle_data['low']:.4f} C:{candle_data['close']:.4f} V:{volume_str}",
                     args=(),
                     exc_info=None
                 )

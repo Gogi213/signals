@@ -170,6 +170,11 @@ class TradeWebSocket:
                                             price = float(trade['p'])
                                             size = float(trade['q'])
 
+                                            # Skip invalid trades (X='NA' means Not Applicable - system events, not real trades)
+                                            # Also skip zero price/quantity trades
+                                            if price == 0 or size == 0 or trade.get('X') == 'NA':
+                                                continue  # Skip invalid trade
+
                                             # Binance: m=true means buyer is maker (sell order filled), so it's a sell
                                             side = 'Sell' if trade['m'] else 'Buy'
 
